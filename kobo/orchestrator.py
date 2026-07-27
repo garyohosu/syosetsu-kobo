@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from mail.agent_mail import AgentMail, MailError
+from .gemini import GeminiAdapter, GeminiError
 
 
 WORK_ID = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
@@ -282,6 +283,8 @@ class Orchestrator:
         template = self.config.commands.get(agent.adapter)
         if not template:
             raise KoboError(f"アダプターが登録されていません: {agent.adapter}")
+        if agent.adapter == "gemini":
+            return GeminiAdapter(template[0], template[1:])
         return CliAdapter(template)
 
     def _refs(self, agent: AgentDefinition, run_id: str, run_dir: Path, task_path: Path, output_path: Path, mail_id: int) -> dict[str, str]:
@@ -293,7 +296,7 @@ class Orchestrator:
         work = self.get_work(work_id); agent = self.agents[work["next_agent"]]
         run_id = self.id_factory(); run_dir = self.config.store / "works" / work["work_id"] / "runs" / run_id
         refs = {"agent_path": str(agent.path), "task_path": str(run_dir / "task.md"), "mail_db": str(self.config.mail_db), "mail_id": "<mail-id>", "run_id": run_id, "run_dir": str(run_dir), "output_path": str(run_dir / "result.md"), "model": self.config.models.get(agent.agent_id, self.config.models.get(agent.adapter, agent.model))}
-        return {"agent_id": agent.agent_id, "adapter": agent.adapter, "command": self._adapter(agent).command(agent, refs), "references": refs}
+        return {"agent_id": agent.agent_id, "adapter": agent.adapter, "model": refs["model"], "timeout": agent.timeout, "command": self._adapter(agent).command(agent, refs), "references": refs}
 
     def run_step(self, work_id: str | None = None) -> dict:
         work = self.get_work(work_id)
@@ -323,7 +326,7 @@ class Orchestrator:
                 adapter.execute(agent, refs, output_path)
                 error = None
                 break
-            except (KoboError, OSError) as caught:
+            except (KoboError, GeminiError, OSError) as caught:
                 error = caught
                 with self.connection() as db:
                     db.execute("UPDATE runs SET attempt=?, error=?, updated_at=? WHERE run_id=?", (attempt, str(caught), now(), run_id))

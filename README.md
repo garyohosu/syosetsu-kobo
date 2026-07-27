@@ -33,13 +33,20 @@ py -3 -m kobo.cli --config kobo.json history --work sample-story
 
 設定は`kobo.json`に置きます。設定ファイルの場所は`--config`、環境変数`KOBO_CONFIG`、`./kobo.json`の順です。保存先は`KOBO_STORE`、`KOBO_STATE_DB`、`KOBO_MAIL_DB`、`KOBO_AGENTS_DIR`で個別に上書きできます。相対パスは設定ファイルのあるディレクトリ基準です。エージェントのモデルは`models.<agent_id>`、`models.<adapter>`、Markdown既定値の順です。
 
-Gemini CLIの登録例です。テンプレートに展開できるのは、モデル、入力・出力・エージェント定義のパス、メールDB／ID、実行ID／ディレクトリという短い参照だけです。
+Gemini CLI 0.45.2で確認した登録例です。WindowsではPythonが`.cmd`ランチャーを安全に解決し、POSIXでは同じ`gemini`名を使えます。
 
 ```json
-{"commands":{"gemini":["gemini","--model","{model}","--input","{task_path}","--output","{output_path}"]}}
+{"commands":{"gemini":["gemini","--approval-mode","plan"]}}
 ```
 
-未知のアダプター、存在しないエージェント定義、不正な値、許可範囲外のパスはエラーになります。CLIは`{"ok":...}`形式のJSONを返し、失敗時は終了コード1です。
+実際の非対話契約は`gemini --model <短いモデル名> --output-format text --prompt <短い固定指示>`で、タスクMarkdownの内容は標準入力へ渡し、stdoutをPythonが`result.md`へ原子的に保存します。架空の`--input`、`--output`オプションは使いません。未知のアダプター、存在しない定義、不正値、許可範囲外パスはエラーになります。
+
+```powershell
+py -3 -m kobo.cli --config kobo.json gemini-doctor
+py -3 -m kobo.cli --config kobo.json gemini-smoke
+```
+
+`gemini-doctor`は導入、版、非対話・stdin・モデル・出力形式の対応を、認証情報やプロンプトなしで確認します。`gemini-smoke`は明示実行時だけ、一般的な短文を外部送信します。通常テストと`--dummy`はネットワークを使いません。未導入、認証、タイムアウト、非ゼロ終了、空出力、不正出力を区別し、Gemini失敗時に他AIへ切り替えません。
 
 ## 参照渡しとdry-run
 
@@ -64,6 +71,26 @@ py -3 -m kobo.cli --config kobo.json --dummy continue --work sample-story
 ```
 
 前回`running`だった履歴を`interrupted`として確定し、完了済み工程を飛ばして`next_agent`から新しい実行IDで再開します。失敗履歴は`retry <run-id>`で再試行でき、以前の成果物は上書きしません。
+
+## 対話型URS
+
+作品作成後、一問ずつ要求を収集できます。全コマンドはJSONを返すため、将来のUIからも利用できます。
+
+```powershell
+py -3 -m kobo.cli --config kobo.json --dummy work-create my-story "新しい作品" --first-agent urs-maker
+py -3 -m kobo.cli --config kobo.json --dummy urs-start --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy urs-question --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy urs-answer work-name "仮題" --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy urs-defer core-axis --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy urs-answer work-name "改訂仮題" --work my-story --revise
+py -3 -m kobo.cli --config kobo.json --dummy urs-status --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy urs-preview --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy urs-finalize --work my-story
+```
+
+`urs-interactive`は同じAPIを端末から対話的に使います。回答は`confirmed`、`provisional`、`deferred`を持ち、根拠は`user`、`known`、`ai_inference`、`source`を区別します。既知情報の一括投入は本文をargvへ載せず、`urs-start --known-json <path>`で行います。回答履歴はSQLiteへ残り、再起動後も未回答の次の一問から再開します。
+
+プレビューは`URS.preview.md`、確定版は作品ごとの`URS.v001.md`以降へ保存されます。確定版を上書きせず、再改訂は新しい版になります。未回答と保留をAIが補完して確定へ昇格させることはありません。確定時はメールIDと会話系列を保ったまま企画担当へMarkdownパスを渡します。
 
 ## テスト
 

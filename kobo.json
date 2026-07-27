@@ -6,7 +6,7 @@
   "first_agent": "planner",
   "commands": {
     "dummy": ["dummy"],
-    "gemini": ["gemini", "--model", "{model}", "--input", "{task_path}", "--output", "{output_path}"]
+    "gemini": ["gemini", "--approval-mode", "plan"]
   },
   "models": {"gemini": "gemini-2.5-pro"},
   "default_timeout": 300,

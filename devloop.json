@@ -1,0 +1,1 @@
+{"instructions":"instructions","database":".kobo/devloop.db","implement":[],"review":[],"tests":[["python","-m","unittest","discover","-v"],["python","-m","compileall","-q","kobo","mail","tests"]],"max_rounds":1,"timeout":1800}

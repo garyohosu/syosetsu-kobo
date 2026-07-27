@@ -143,6 +143,19 @@ py -3 -m kobo.cli manuscript-finalize --work my-story
 
 `--dummy`は実際の小説を書かず、ダミー本文で状態と契約だけを検証します。実運用の初稿・改稿は`writer`のGeminiアダプター専任です。初稿、監査、改稿、再監査、確定本文は別ファイルで保存され、`manuscript-resume`は完成済み工程を再実行しません。監査だけでは確定せず、利用者承認後に`CHAPTER-NNN.vNNN.md`を非上書きで作ります。
 
+## 連続開発ループ
+
+`devloop-status`は`instructions/instruction-*.md`と対応する`result-*.md`、SQLite実行履歴を照合します。`devloop-once`は既定でdry-runです。`devloop.json`へ実装AI・レビューAIの固定コマンドを設定し、明示的に`--execute`を付けた場合だけpull、実装、テスト、レビューを行い、さらに`--publish`を付けた場合だけcommit・pushします。長文はコマンド引数ではなく`{instruction_path}`と`{result_path}`で渡します。
+
+```powershell
+py -3 -m kobo.cli devloop-status
+py -3 -m kobo.cli devloop-once
+py -3 -m kobo.cli devloop-once --execute
+py -3 -m kobo.cli devloop-once --execute --publish
+```
+
+実装AIコマンド未設定、テスト・レビュー失敗、result未生成、Git失敗では停止します。既定設定のまま外部AIやGit書込みを実行することはありません。
+
 ## テスト
 
 ```powershell

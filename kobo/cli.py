@@ -11,6 +11,7 @@ from .urs import UrsManager
 from .concept import ConceptManager
 from .story_design import StoryDesignManager
 from .manuscript import ManuscriptManager
+from .devloop import DevLoop, DevLoopConfig
 
 
 def parser() -> argparse.ArgumentParser:
@@ -49,6 +50,8 @@ def parser() -> argparse.ArgumentParser:
     for name in ("manuscript-resume","manuscript-status","manuscript-approve","manuscript-finalize"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
     manuscript_show=sub.add_parser("manuscript-show"); manuscript_show.add_argument("kind",choices=("chapter_design","scene_design","draft","audit","revision","reaudit","final")); manuscript_show.add_argument("--work"); manuscript_show.add_argument("--session")
+    dev_status=sub.add_parser("devloop-status"); dev_status.add_argument("--dev-config",type=Path,default=Path("devloop.json"))
+    dev_once=sub.add_parser("devloop-once"); dev_once.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_once.add_argument("--execute",action="store_true"); dev_once.add_argument("--publish",action="store_true")
     return root
 
 
@@ -98,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
             task.write_text("# 接続確認\n\nこれは機密情報や小説本文を含まない接続テストです。日本語で「接続確認成功」とだけ回答してください。\n", encoding="utf-8")
             refs = {"task_path":str(task),"output_path":str(output),"model":args.model or config.models.get("gemini",agent.model),"run_id":run_id,"run_dir":str(run_dir),"agent_path":str(agent.path),"mail_db":str(config.mail_db),"mail_id":"diagnostic"}
             result = adapter.smoke(agent, refs, output)
+        elif args.command.startswith("devloop-"):
+            loop=DevLoop(DevLoopConfig.load(args.dev_config))
+            result=loop.status() if args.command=="devloop-status" else loop.once(args.execute,args.publish)
         elif args.command.startswith("manuscript-"):
             manager=ManuscriptManager(orchestrator,dummy=args.dummy)
             if args.command=="manuscript-start": result=manager.start(args.chapter,args.title,args.work)

@@ -1,10 +1,9 @@
-"""SQLite mailbox and μITRON-style one-message-at-a-time agent workers."""
+"""SQLite mailbox and wait-polling one-message-at-a-time agent workers."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import sqlite3
 import subprocess
 import threading
@@ -19,7 +18,8 @@ from typing import Callable, Iterator, Sequence
 
 MAIL_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE = MAIL_DIR / "agent_mail.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+DEFAULT_MAX_BODY_LENGTH = 100_000
 STATUSES = ("pending", "processing", "completed", "failed")
 
 BASE_SCHEMA = """
@@ -67,16 +67,58 @@ class WorkItem:
     conversation_id: str | None = None
     parent_message_id: int | None = None
     hop_count: int = 0
+    lease_token: str | None = None
+    lease_generation: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class WorkerConfig:
-    max_retries: int = 3
-    timeout: float = 300.0
-    poll_interval: float = 1.0
-    stale_after: float = 900.0
-    max_hops: int = 10
-    escalation_agent_id: str | None = None
+    max_attempts: int
+    timeout: float
+    poll_interval: float
+    stale_after: float
+    max_hops: int
+    escalation_agent_id: str | None
+
+    def __init__(
+        self,
+        max_attempts: int | None = None,
+        timeout: float = 300.0,
+        poll_interval: float = 1.0,
+        stale_after: float = 900.0,
+        max_hops: int = 10,
+        escalation_agent_id: str | None = None,
+        *,
+        max_retries: int | None = None,
+    ) -> None:
+        if max_attempts is not None and max_retries is not None and max_attempts != max_retries:
+            raise MailError("max_attemptsとmax_retriesに矛盾する値を同時指定できません")
+        attempts = max_attempts if max_attempts is not None else max_retries
+        self._validate_positive_int(attempts if attempts is not None else 3, "max_attempts")
+        if timeout <= 0 or poll_interval < 0 or stale_after <= 0:
+            raise MailError("timeoutは正、poll_intervalは0以上、stale_afterは正で指定してください")
+        self._validate_nonnegative_int(max_hops, "max_hops")
+        object.__setattr__(self, "max_attempts", attempts if attempts is not None else 3)
+        object.__setattr__(self, "timeout", float(timeout))
+        object.__setattr__(self, "poll_interval", float(poll_interval))
+        object.__setattr__(self, "stale_after", float(stale_after))
+        object.__setattr__(self, "max_hops", max_hops)
+        object.__setattr__(self, "escalation_agent_id", escalation_agent_id)
+
+    @property
+    def max_retries(self) -> int:
+        """Compatibility alias; the value means total attempts including the first."""
+        return self.max_attempts
+
+    @staticmethod
+    def _validate_positive_int(value: int, name: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise MailError(f"{name}は1以上の整数で指定してください")
+
+    @staticmethod
+    def _validate_nonnegative_int(value: int, name: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise MailError(f"{name}は0以上の整数で指定してください")
 
 
 class MailError(RuntimeError):
@@ -84,8 +126,11 @@ class MailError(RuntimeError):
 
 
 class AgentMail:
-    def __init__(self, database: str | Path):
+    def __init__(self, database: str | Path, *, max_body_length: int = DEFAULT_MAX_BODY_LENGTH):
         self.database = Path(database)
+        if isinstance(max_body_length, bool) or not isinstance(max_body_length, int) or max_body_length < 1:
+            raise MailError("max_body_lengthは1以上の整数で指定してください")
+        self.max_body_length = max_body_length
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -110,6 +155,7 @@ class AgentMail:
 
     def initialize(self) -> None:
         self.database.parent.mkdir(parents=True, exist_ok=True)
+        existed = self.database.exists()
         with self.connection() as connection:
             connection.execute("BEGIN")
             connection.executescript(BASE_SCHEMA)
@@ -125,6 +171,8 @@ class AgentMail:
                 "parent_message_id": "INTEGER",
                 "hop_count": "INTEGER NOT NULL DEFAULT 0",
                 "escalation_sent": "INTEGER NOT NULL DEFAULT 0",
+                "lease_token": "TEXT",
+                "lease_generation": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, definition in additions.items():
                 if name not in columns:
@@ -135,35 +183,69 @@ class AgentMail:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_stale ON messages(processing_status, processing_started_at)")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
+        if not existed:
+            self._secure_database_files()
 
     def register_agent(self, agent_id: str, display_name: str | None = None) -> None:
         self._require_text(agent_id, "agent_id")
         with self.connection() as connection:
             connection.execute("BEGIN")
-            connection.execute(
-                "INSERT INTO agents(agent_id, display_name, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(agent_id) DO UPDATE SET display_name = COALESCE(excluded.display_name, agents.display_name)",
-                (agent_id, display_name, utc_now()),
-            )
+            row = connection.execute("SELECT display_name FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
+            if row is not None and display_name is not None and row["display_name"] not in (None, display_name):
+                raise MailError(f"登録済みエージェントの表示名が異なります: {agent_id}")
+            if row is None:
+                connection.execute("INSERT INTO agents(agent_id, display_name, created_at) VALUES (?, ?, ?)", (agent_id, display_name, utc_now()))
+            connection.commit()
+
+    def ensure_agent(self, agent_id: str, display_name: str | None = None) -> None:
+        """Register only when absent; never overwrite an existing agent."""
+        self._require_text(agent_id, "agent_id")
+        with self.connection() as connection:
+            connection.execute("BEGIN")
+            connection.execute("INSERT OR IGNORE INTO agents(agent_id, display_name, created_at) VALUES (?, ?, ?)", (agent_id, display_name, utc_now()))
             connection.commit()
 
     def send(
         self, sender_id: str, recipient_id: str, body: str,
         *, conversation_id: str | None = None, parent_message_id: int | None = None,
-        hop_count: int = 0,
+        hop_count: int | None = None, thread_id: str | None = None, parent_id: int | None = None,
     ) -> int:
         self._require_text(body, "body")
+        if len(body) > self.max_body_length:
+            raise MailError(f"本文が最大長を超えています: {self.max_body_length}文字")
+        if thread_id is not None:
+            if conversation_id is not None and conversation_id != thread_id:
+                raise MailError("conversation_idとthread_idが一致しません")
+            conversation_id = thread_id
+        if parent_id is not None:
+            if parent_message_id is not None and parent_message_id != parent_id:
+                raise MailError("parent_message_idとparent_idが一致しません")
+            parent_message_id = parent_id
         if sender_id == recipient_id:
             raise MailError("送信元と受信先には別のAIエージェントIDを指定してください")
-        if hop_count < 0:
+        if hop_count is not None and hop_count < 0:
             raise MailError("hop_countは0以上で指定してください")
         with self.connection() as connection:
             connection.execute("BEGIN")
             self._ensure_agents_exist(connection, sender_id, recipient_id)
             if parent_message_id is not None:
-                parent = connection.execute("SELECT id FROM messages WHERE id = ?", (parent_message_id,)).fetchone()
+                parent = connection.execute("SELECT * FROM messages WHERE id = ?", (parent_message_id,)).fetchone()
                 if parent is None:
                     raise MailError(f"親メールが存在しません: {parent_message_id}")
+                if sender_id != parent["recipient_id"]:
+                    raise MailError("派生メールの送信元は親メールの受信先でなければなりません")
+                if conversation_id is not None and conversation_id != parent["conversation_id"]:
+                    raise MailError("派生メールの系列IDが親メールと一致しません")
+                expected_hop = parent["hop_count"] + 1
+                if hop_count is not None and hop_count != expected_hop:
+                    raise MailError("派生メールのホップ数が親メールから連続していません")
+                self._ensure_parent_chain(connection, parent_message_id)
+                conversation_id = parent["conversation_id"]
+                hop_count = expected_hop
+            elif hop_count not in (None, 0):
+                raise MailError("親メールなしの新規メールのhop_countは0でなければなりません")
+            else:
+                hop_count = 0
             now = utc_now()
             cursor = connection.execute(
                 "INSERT INTO messages(sender_id, recipient_id, body, created_at, updated_at, conversation_id, parent_message_id, hop_count) "
@@ -189,7 +271,7 @@ class AgentMail:
             self._ensure_agents_exist(connection, agent_id)
             rows = connection.execute(
                 "SELECT id, sender_id, recipient_id, body, reply, created_at, processing_status, attempt_count, last_error, "
-                "conversation_id, parent_message_id, hop_count, recipient_read, "
+                "conversation_id, parent_message_id, hop_count, recipient_read, lease_token, lease_generation, "
                 "CASE WHEN recipient_id = ? AND recipient_read = 0 THEN 'received' ELSE 'reply' END kind, "
                 "CASE WHEN recipient_id = ? AND recipient_read = 0 THEN created_at ELSE replied_at END event_at "
                 "FROM messages WHERE (recipient_id = ? AND recipient_read = 0) OR (sender_id = ? AND recipient_read = 1 AND sender_read = 0) "
@@ -203,6 +285,8 @@ class AgentMail:
 
     def reply(self, agent_id: str, message_id: int, reply: str) -> None:
         self._require_text(reply, "reply")
+        if len(reply) > self.max_body_length:
+            raise MailError(f"本文が最大長を超えています: {self.max_body_length}文字")
         with self.connection() as connection:
             connection.execute("BEGIN")
             cursor = connection.execute(
@@ -236,10 +320,12 @@ class AgentMail:
                 connection.commit()
                 return None
             now = utc_now()
+            lease_token = str(uuid.uuid4())
             cursor = connection.execute(
                 "UPDATE messages SET processing_status = 'processing', attempt_count = attempt_count + 1, "
-                "processing_started_at = ?, updated_at = ? WHERE id = ? AND processing_status = 'pending'",
-                (now, now, row["id"]),
+                "processing_started_at = ?, updated_at = ?, lease_token = ?, lease_generation = lease_generation + 1 "
+                "WHERE id = ? AND processing_status = 'pending'",
+                (now, now, lease_token, row["id"]),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
@@ -249,10 +335,13 @@ class AgentMail:
             return self._work_item(row)
 
     def finish(self, message_id: int) -> None:
-        self._transition(message_id, "completed", None)
+        raise MailError("finishには取得時のlease_tokenとlease_generationが必要です")
 
-    def fail(self, message_id: int, error: str, *, retry: bool) -> None:
-        self._transition(message_id, "pending" if retry else "failed", error)
+    def complete(self, item: WorkItem) -> None:
+        self._transition(item, "completed", None)
+
+    def fail(self, item: WorkItem, error: str, *, retry: bool) -> None:
+        self._transition(item, "pending" if retry else "failed", error)
 
     def recover_stale(self, stale_after: float, agent_id: str | None = None) -> int:
         if stale_after < 0:
@@ -263,7 +352,7 @@ class AgentMail:
             rows = connection.execute("SELECT id, processing_started_at FROM messages WHERE processing_status = 'processing'" + (" AND recipient_id = ?" if agent_id else ""), ((agent_id,) if agent_id else ())).fetchall()
             ids = [row["id"] for row in rows if row["processing_started_at"] and self._timestamp_seconds(row["processing_started_at"]) <= cutoff]
             for message_id in ids:
-                connection.execute("UPDATE messages SET processing_status = 'pending', processing_started_at = NULL, updated_at = ? WHERE id = ? AND processing_status = 'processing'", (utc_now(), message_id))
+                connection.execute("UPDATE messages SET processing_status = 'pending', processing_started_at = NULL, lease_token = NULL, lease_generation = lease_generation + 1, updated_at = ? WHERE id = ? AND processing_status = 'processing'", (utc_now(), message_id))
             connection.commit()
         return len(ids)
 
@@ -278,15 +367,15 @@ class AgentMail:
             for row in connection.execute(query, params): result[row["processing_status"]] = row["count"]
         return result
 
-    def _transition(self, message_id: int, status: str, error: str | None) -> None:
+    def _transition(self, item: WorkItem, status: str, error: str | None) -> None:
         with self.connection() as connection:
             connection.execute("BEGIN")
             now = utc_now()
             completed = now if status == "completed" else None
             cursor = connection.execute(
                 "UPDATE messages SET processing_status = ?, last_error = ?, completed_at = ?, updated_at = ? "
-                "WHERE id = ? AND processing_status = 'processing'",
-                (status, error, completed, now, message_id),
+                "WHERE id = ? AND processing_status = 'processing' AND lease_token = ? AND lease_generation = ?",
+                (status, error, completed, now, item.message_id, item.lease_token, item.lease_generation),
             )
             if cursor.rowcount != 1: raise MailError("処理中のメールが見つかりません")
             connection.commit()
@@ -299,11 +388,32 @@ class AgentMail:
     def _work_item(row: sqlite3.Row) -> WorkItem:
         kind = row["kind"] if "kind" in row.keys() else ("received" if row["recipient_read"] == 0 else "reply")
         event_at = row["event_at"] if "event_at" in row.keys() else row["created_at"]
-        return WorkItem(kind, row["id"], row["sender_id"], row["recipient_id"], row["body"], row["reply"], row["created_at"], event_at, row["processing_status"], row["attempt_count"], row["last_error"], row["conversation_id"], row["parent_message_id"], row["hop_count"])
+        return WorkItem(kind, row["id"], row["sender_id"], row["recipient_id"], row["body"], row["reply"], row["created_at"], event_at, row["processing_status"], row["attempt_count"], row["last_error"], row["conversation_id"], row["parent_message_id"], row["hop_count"], row["lease_token"], row["lease_generation"])
 
     @staticmethod
     def _require_text(value: str, name: str) -> None:
         if not value or not value.strip(): raise MailError(f"{name}を空にはできません")
+
+    @staticmethod
+    def _ensure_parent_chain(connection: sqlite3.Connection, parent_id: int) -> None:
+        seen: set[int] = set()
+        current: int | None = parent_id
+        while current is not None:
+            if current in seen:
+                raise MailError("メール系列に循環参照があります")
+            seen.add(current)
+            row = connection.execute("SELECT parent_message_id FROM messages WHERE id = ?", (current,)).fetchone()
+            if row is None:
+                raise MailError(f"親メールが存在しません: {current}")
+            current = row["parent_message_id"]
+
+    def _secure_database_files(self) -> None:
+        for path in (self.database, Path(str(self.database) + "-wal"), Path(str(self.database) + "-shm")):
+            try:
+                if path.exists():
+                    path.chmod(0o600)
+            except OSError:
+                continue
 
     @staticmethod
     def _ensure_agents_exist(connection: sqlite3.Connection, *agent_ids: str) -> None:
@@ -353,9 +463,9 @@ class Worker:
         if item is None: return False
         if item.hop_count > self.config.max_hops:
             error = f"最大ホップ数を超過しました: {item.hop_count} > {self.config.max_hops}"
-            self.mailbox.fail(item.message_id, error, retry=False)
+            self.mailbox.fail(item, error, retry=False)
             if self.config.escalation_agent_id:
-                self.mailbox.send(self.agent_id, self.config.escalation_agent_id, error, conversation_id=item.conversation_id, parent_message_id=item.message_id, hop_count=item.hop_count)
+                self.mailbox.send(self.agent_id, self.config.escalation_agent_id, error, conversation_id=item.conversation_id, parent_message_id=item.message_id, hop_count=item.hop_count + 1)
             return True
         context = HandlerContext(self.mailbox, item, self.agent_id)
         error: str | None = None
@@ -369,9 +479,9 @@ class Worker:
         if thread.is_alive(): error = f"処理がタイムアウトしました: {self.config.timeout}秒"
         elif thread_error: error = f"{type(thread_error[0]).__name__}: {thread_error[0]}"
         if error:
-            self.mailbox.fail(item.message_id, error, retry=item.attempt_count < self.config.max_retries)
+            self.mailbox.fail(item, error, retry=item.attempt_count < self.config.max_attempts)
         else:
-            self.mailbox.finish(item.message_id)
+            self.mailbox.complete(item)
         return True
 
     def run(self, *, max_messages: int | None = None) -> int:
@@ -386,16 +496,17 @@ class Worker:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AIエージェント用SQLiteメールシステム")
     parser.add_argument("--db", default=str(DEFAULT_DATABASE))
+    parser.add_argument("--max-body-length", type=int, default=DEFAULT_MAX_BODY_LENGTH)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     register = sub.add_parser("register"); register.add_argument("agent_id"); register.add_argument("--name")
-    send = sub.add_parser("send"); send.add_argument("--from", dest="sender_id", required=True); send.add_argument("--to", dest="recipient_id", required=True); send.add_argument("--body", required=True); send.add_argument("--conversation"); send.add_argument("--parent", type=int); send.add_argument("--hop", type=int, default=0)
+    send = sub.add_parser("send"); send.add_argument("--from", dest="sender_id", required=True); send.add_argument("--to", dest="recipient_id", required=True); send.add_argument("--body", required=True); send.add_argument("--conversation"); send.add_argument("--parent", type=int); send.add_argument("--hop", type=int, default=None)
     unread = sub.add_parser("unread"); unread.add_argument("--agent", required=True)
     check = sub.add_parser("check"); check.add_argument("--agent", required=True)
     reply = sub.add_parser("reply"); reply.add_argument("--agent", required=True); reply.add_argument("--message", type=int, required=True); reply.add_argument("--body", required=True)
     read = sub.add_parser("mark-reply-read"); read.add_argument("--agent", required=True); read.add_argument("--message", type=int, required=True)
     for name in ("worker-once", "worker-loop"):
-        worker = sub.add_parser(name); worker.add_argument("--agent", required=True); worker.add_argument("--timeout", type=float, default=300); worker.add_argument("--interval", type=float, default=1); worker.add_argument("--max-retries", type=int, default=3); worker.add_argument("--stale-after", type=float, default=900); worker.add_argument("--max-hops", type=int, default=10); worker.add_argument("--escalation-agent"); worker.add_argument("--command", dest="handler_command", nargs=argparse.REMAINDER, required=True)
+        worker = sub.add_parser(name); worker.add_argument("--agent", required=True); worker.add_argument("--timeout", type=float, default=300); worker.add_argument("--interval", type=float, default=1); worker.add_argument("--max-attempts", type=int); worker.add_argument("--max-retries", type=int); worker.add_argument("--stale-after", type=float, default=900); worker.add_argument("--max-hops", type=int, default=10); worker.add_argument("--escalation-agent"); worker.add_argument("--command", dest="handler_command", nargs=argparse.REMAINDER, required=True)
         if name == "worker-loop": worker.add_argument("--max-messages", type=int)
     recover = sub.add_parser("recover"); recover.add_argument("--stale-after", type=float, required=True); recover.add_argument("--agent")
     status = sub.add_parser("worker-status"); status.add_argument("--agent")
@@ -403,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv); mailbox = AgentMail(args.db)
+    args = build_parser().parse_args(argv); mailbox = AgentMail(args.db, max_body_length=args.max_body_length)
     try:
         if args.command == "init": mailbox.initialize(); result = {"database": str(mailbox.database), "initialized": True}
         elif args.command == "register": mailbox.register_agent(args.agent_id, args.name); result = {"agent_id": args.agent_id, "registered": True}
@@ -415,10 +526,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "recover": result = {"recovered": mailbox.recover_stale(args.stale_after, args.agent)}
         elif args.command == "worker-status": result = mailbox.worker_status(args.agent)
         else:
-            mailbox.initialize(); mailbox.register_agent(args.agent, args.agent)
-            if args.escalation_agent: mailbox.register_agent(args.escalation_agent, args.escalation_agent)
+            mailbox.initialize(); mailbox.ensure_agent(args.agent, args.agent)
+            if args.escalation_agent: mailbox.ensure_agent(args.escalation_agent, args.escalation_agent)
             registry = HandlerRegistry(); registry.register("default", SubprocessHandler(args.handler_command, args.timeout))
-            config = WorkerConfig(args.max_retries, args.timeout, args.interval, args.stale_after, args.max_hops, args.escalation_agent)
+            config = WorkerConfig(args.max_attempts, args.timeout, args.interval, args.stale_after, args.max_hops, args.escalation_agent, max_retries=args.max_retries)
             worker = Worker(mailbox, args.agent, registry, config)
             try: count = worker.run_once() if args.command == "worker-once" else worker.run(max_messages=args.max_messages)
             except KeyboardInterrupt: worker.stop(); count = 0

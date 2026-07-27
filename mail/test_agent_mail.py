@@ -2,12 +2,15 @@ import tempfile
 import threading
 import time
 import unittest
+import os
+import stat
+import sys
 from pathlib import Path
 
 try:
-    from .agent_mail import AgentMail, HandlerContext, HandlerRegistry, MailError, Worker, WorkerConfig
+    from .agent_mail import AgentMail, HandlerContext, HandlerRegistry, MailError, SubprocessHandler, Worker, WorkerConfig
 except ImportError:
-    from agent_mail import AgentMail, HandlerContext, HandlerRegistry, MailError, Worker, WorkerConfig
+    from agent_mail import AgentMail, HandlerContext, HandlerRegistry, MailError, SubprocessHandler, Worker, WorkerConfig
 
 
 class AgentMailTest(unittest.TestCase):
@@ -151,12 +154,15 @@ class AgentMailTest(unittest.TestCase):
 
     def test_max_hop_escalates_without_loop(self) -> None:
         self.mailbox.register_agent("manager", "manager")
-        message_id = self.mailbox.send("writer", "reviewer", "loop", hop_count=3)
-        worker = self.worker(lambda item, context: None, max_hops=2, escalation_agent_id="manager")
+        root = self.mailbox.send("writer", "reviewer", "root")
+        self.mailbox.reply("reviewer", root, "received")
+        middle = self.mailbox.send("reviewer", "manager", "middle", parent_message_id=root)
+        message_id = self.mailbox.send("manager", "reviewer", "loop", parent_message_id=middle)
+        worker = self.worker(lambda item, context: None, max_hops=1, escalation_agent_id="manager")
         worker.run_once()
         with self.mailbox.connection() as connection:
             source = connection.execute("SELECT processing_status, last_error FROM messages WHERE id = ?", (message_id,)).fetchone()
-            escalation = connection.execute("SELECT recipient_id, body FROM messages WHERE sender_id = 'reviewer'").fetchone()
+            escalation = connection.execute("SELECT recipient_id, body FROM messages WHERE sender_id = 'reviewer' ORDER BY id DESC").fetchone()
         self.assertEqual(source["processing_status"], "failed")
         self.assertEqual(escalation["recipient_id"], "manager")
         self.assertIn("最大ホップ数", escalation["body"])
@@ -182,6 +188,69 @@ class AgentMailTest(unittest.TestCase):
         self.mailbox.initialize()
         self.mailbox.initialize()
         self.assertEqual(self.mailbox.claim_next("b").body, "legacy")
+
+    def test_processing_completed_is_distinct_from_read_and_reply(self) -> None:
+        message_id = self.mailbox.send("writer", "reviewer", "work")
+        self.worker(lambda item, context: None).run_once()
+        with self.mailbox.connection() as connection:
+            row = connection.execute("SELECT processing_status, recipient_read, reply FROM messages WHERE id = ?", (message_id,)).fetchone()
+        self.assertEqual((row["processing_status"], row["recipient_read"], row["reply"]), ("completed", 0, None))
+
+    def test_max_attempts_is_total_and_alias_is_compatible(self) -> None:
+        self.assertEqual(WorkerConfig(max_attempts=3).max_retries, 3)
+        self.assertEqual(WorkerConfig(max_retries=3).max_attempts, 3)
+        with self.assertRaises(MailError): WorkerConfig(max_attempts=2, max_retries=3)
+        message_id = self.mailbox.send("writer", "reviewer", "retry")
+        calls = []
+        worker = self.worker(lambda item, context: calls.append(item.message_id) or (_ for _ in ()).throw(ValueError("x")), max_attempts=3)
+        for _ in range(3): worker.run_once()
+        self.assertEqual(len(calls), 3)
+        with self.mailbox.connection() as connection:
+            self.assertEqual(connection.execute("SELECT processing_status, attempt_count FROM messages WHERE id = ?", (message_id,)).fetchone()[0:2], ("failed", 3))
+
+    def test_stale_recovery_fences_old_owner(self) -> None:
+        message_id = self.mailbox.send("writer", "reviewer", "lease")
+        first = self.mailbox.claim_next("reviewer")
+        with self.mailbox.connection() as connection:
+            connection.execute("UPDATE messages SET processing_started_at = ? WHERE id = ?", ("2020-01-01T00:00:00+00:00", message_id))
+        self.assertEqual(self.mailbox.recover_stale(1), 1)
+        second = self.mailbox.claim_next("reviewer")
+        with self.assertRaises(MailError): self.mailbox.complete(first)
+        self.mailbox.complete(second)
+
+    def test_subprocess_timeout_returns_and_terminates_child(self) -> None:
+        item = self.mailbox.send("writer", "reviewer", "slow")
+        claimed = self.mailbox.claim_next("reviewer")
+        handler = SubprocessHandler((sys.executable, "-c", "import time; time.sleep(2)"), timeout=0.05)
+        with self.assertRaises(Exception): handler(claimed, HandlerContext(self.mailbox, claimed, "reviewer"))
+        self.mailbox.fail(claimed, "timeout", retry=False)
+        self.assertIsNotNone(item)
+
+    def test_auto_registration_does_not_overwrite_existing_attributes(self) -> None:
+        self.mailbox.ensure_agent("other", "Original")
+        self.mailbox.ensure_agent("other", "New")
+        with self.mailbox.connection() as connection:
+            self.assertEqual(connection.execute("SELECT display_name FROM agents WHERE agent_id = 'other'").fetchone()[0], "Original")
+        with self.assertRaises(MailError): self.mailbox.register_agent("other", "Different")
+
+    def test_lineage_is_derived_and_inconsistent_values_are_rejected(self) -> None:
+        root = self.mailbox.send("writer", "reviewer", "root", thread_id="t1")
+        child = self.mailbox.send("reviewer", "writer", "child", parent_id=root)
+        with self.mailbox.connection() as connection:
+            row = connection.execute("SELECT conversation_id, parent_message_id, hop_count FROM messages WHERE id = ?", (child,)).fetchone()
+        self.assertEqual((row["conversation_id"], row["parent_message_id"], row["hop_count"]), ("t1", root, 1))
+        with self.assertRaises(MailError): self.mailbox.send("reviewer", "writer", "bad", parent_id=root, thread_id="other")
+        with self.assertRaises(MailError): self.mailbox.send("reviewer", "writer", "bad", parent_id=root, hop_count=9)
+
+    def test_body_limit_rejects_overflow(self) -> None:
+        mailbox = AgentMail(self.mailbox.database, max_body_length=4)
+        with self.assertRaises(MailError): mailbox.send("writer", "reviewer", "12345")
+        mailbox.send("writer", "reviewer", "1234")
+
+    @unittest.skipUnless(os.name == "posix", "file mode is platform dependent")
+    def test_new_database_is_owner_only(self) -> None:
+        path = self.mailbox.database
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

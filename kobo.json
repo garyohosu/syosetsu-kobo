@@ -1,0 +1,16 @@
+{
+  "store": ".kobo",
+  "state_db": ".kobo/state.db",
+  "mail_db": ".kobo/mail.db",
+  "agents_dir": "agents",
+  "first_agent": "planner",
+  "commands": {
+    "dummy": ["dummy"],
+    "gemini": ["gemini", "--model", "{model}", "--input", "{task_path}", "--output", "{output_path}"]
+  },
+  "models": {"gemini": "gemini-2.5-pro"},
+  "default_timeout": 300,
+  "max_attempts": 3,
+  "max_hops": 10,
+  "escalation_agent": "manager"
+}

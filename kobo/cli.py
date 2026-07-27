@@ -8,6 +8,7 @@ from pathlib import Path
 from .orchestrator import Config, DummyAdapter, KoboError, Orchestrator, load_agents
 from .gemini import GeminiAdapter, GeminiError
 from .urs import UrsManager
+from .concept import ConceptManager
 
 
 def parser() -> argparse.ArgumentParser:
@@ -29,6 +30,14 @@ def parser() -> argparse.ArgumentParser:
     answer = sub.add_parser("urs-answer"); answer.add_argument("question_id"); answer.add_argument("answer"); answer.add_argument("--work"); answer.add_argument("--session"); answer.add_argument("--status", choices=("confirmed","provisional"), default="confirmed"); answer.add_argument("--evidence", choices=("user","known","ai_inference","source"), default="user"); answer.add_argument("--revise", action="store_true")
     defer = sub.add_parser("urs-defer"); defer.add_argument("question_id"); defer.add_argument("--work"); defer.add_argument("--session")
     history = sub.add_parser("urs-answer-history"); history.add_argument("question_id"); history.add_argument("--work"); history.add_argument("--session")
+    concept_start=sub.add_parser("concept-start"); concept_start.add_argument("--work"); concept_start.add_argument("--count",type=int,default=3)
+    for name in ("concept-status","concept-list","concept-compare","concept-history","concept-preview","concept-finalize","concept-resume"):
+        command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    detail=sub.add_parser("concept-show"); detail.add_argument("candidate_id"); detail.add_argument("--work"); detail.add_argument("--session")
+    select=sub.add_parser("concept-select"); select.add_argument("candidate_id"); select.add_argument("--work"); select.add_argument("--session")
+    for name in ("concept-hold","concept-reject-all","concept-regenerate"):
+        command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    revise=sub.add_parser("concept-revise"); revise.add_argument("candidate_id"); revise.add_argument("--instructions",type=Path,required=True); revise.add_argument("--work"); revise.add_argument("--session")
     return root
 
 
@@ -78,6 +87,22 @@ def main(argv: list[str] | None = None) -> int:
             task.write_text("# 接続確認\n\nこれは機密情報や小説本文を含まない接続テストです。日本語で「接続確認成功」とだけ回答してください。\n", encoding="utf-8")
             refs = {"task_path":str(task),"output_path":str(output),"model":args.model or config.models.get("gemini",agent.model),"run_id":run_id,"run_dir":str(run_dir),"agent_path":str(agent.path),"mail_db":str(config.mail_db),"mail_id":"diagnostic"}
             result = adapter.smoke(agent, refs, output)
+        elif args.command.startswith("concept-"):
+            manager=ConceptManager(orchestrator,dummy=args.dummy)
+            if args.command=="concept-start": result=manager.start(args.work,args.count)
+            elif args.command=="concept-status": result=manager.status(args.work,args.session)
+            elif args.command=="concept-list": result=manager.candidates(args.work,args.session)
+            elif args.command=="concept-show": result=manager.candidate(args.candidate_id,args.work,args.session)
+            elif args.command=="concept-compare": result=manager.comparisons(args.work,args.session)
+            elif args.command=="concept-select": result=manager.action("select",args.candidate_id,work_id=args.work,session_id=args.session)
+            elif args.command=="concept-hold": result=manager.action("hold",work_id=args.work,session_id=args.session)
+            elif args.command=="concept-reject-all": result=manager.action("reject_all",work_id=args.work,session_id=args.session)
+            elif args.command=="concept-regenerate": result=manager.action("regenerate",work_id=args.work,session_id=args.session)
+            elif args.command=="concept-revise": result=manager.action("revise",args.candidate_id,instruction_path=args.instructions,work_id=args.work,session_id=args.session)
+            elif args.command=="concept-history": result=manager.history(args.work,args.session)
+            elif args.command=="concept-preview": result=manager.preview(args.work,args.session)
+            elif args.command=="concept-finalize": result=manager.finalize(args.work,args.session)
+            else: result=manager.resume(args.work,args.session)
         else:
             manager = UrsManager(orchestrator)
             if args.command == "urs-start":

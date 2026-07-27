@@ -92,6 +92,25 @@ py -3 -m kobo.cli --config kobo.json --dummy urs-finalize --work my-story
 
 プレビューは`URS.preview.md`、確定版は作品ごとの`URS.v001.md`以降へ保存されます。確定版を上書きせず、再改訂は新しい版になります。未回答と保留をAIが補完して確定へ昇格させることはありません。確定時はメールIDと会話系列を保ったまま企画担当へMarkdownパスを渡します。
 
+## 複数企画候補の生成・比較・選択
+
+確定済み`URS.vNNN.md`から既定3案を作り、生成担当とは別の`concept-reviewer`が比較します。候補数はCLIで1〜5に変更できます。この範囲は比較時の認知負荷と候補の多様性を両立する仮仕様です。
+
+```powershell
+py -3 -m kobo.cli --config kobo.json --dummy concept-start --work my-story --count 3
+py -3 -m kobo.cli --config kobo.json --dummy concept-status --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-list --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-show C01 --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-compare --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-select C02 --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-preview --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-finalize --work my-story
+```
+
+選択以外に`concept-hold`、`concept-reject-all`、`concept-regenerate`があります。長い修正指示はargvへ載せず、`concept-revise C02 --instructions revision.md`でUTF-8 MarkdownまたはJSONのパスを渡します。`concept-history`は選択・修正履歴、`concept-resume`は中断後の未完了地点を返します。
+
+実行時はplannerの創作生成だけをGeminiへルーティングします。`--dummy`成果物にはダミーであることを明記します。比較は独立成果物としてURS適合性、禁止条件、独自性、先読み欲求、主人公の能動性、持続性、中盤停滞、模倣、矛盾リスクについて根拠・長所・弱点・改善案を残します。AI推奨だけでは確定せず、利用者の明示選択後に限り非上書きの`CONCEPT.vNNN.md`を作ります。
+
 ## テスト
 
 ```powershell

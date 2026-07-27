@@ -111,6 +111,23 @@ py -3 -m kobo.cli --config kobo.json --dummy concept-finalize --work my-story
 
 実行時はplannerの創作生成だけをGeminiへルーティングします。`--dummy`成果物にはダミーであることを明記します。比較は独立成果物としてURS適合性、禁止条件、独自性、先読み欲求、主人公の能動性、持続性、中盤停滞、模倣、矛盾リスクについて根拠・長所・弱点・改善案を残します。AI推奨だけでは確定せず、利用者の明示選択後に限り非上書きの`CONCEPT.vNNN.md`を作ります。
 
+## ストーリーバイブルと全体プロット
+
+確定済み`CONCEPT.vNNN.md`を固定参照し、バイブル生成、独立整合性監査、明示承認、版付き確定、全体プロット生成、独立プロット監査、明示承認、版付き確定の順に進めます。
+
+```powershell
+py -3 -m kobo.cli --dummy story-start --work my-story
+py -3 -m kobo.cli story-show bible_audit --work my-story
+py -3 -m kobo.cli story-approve-bible --work my-story
+py -3 -m kobo.cli story-finalize-bible --work my-story
+py -3 -m kobo.cli --dummy story-start-plot --work my-story
+py -3 -m kobo.cli story-show plot_audit --work my-story
+py -3 -m kobo.cli story-approve-plot --work my-story
+py -3 -m kobo.cli story-finalize-plot --work my-story
+```
+
+実運用では`story-architect`と`plotter`だけをGeminiへルーティングし、監査は別担当・別実行ID・別成果物にします。`story-resume`は完成済み成果物を再生成しません。監査は自動承認ではなく、利用者承認後だけ`STORY_BIBLE.vNNN.md`と`PLOT.vNNN.md`を非上書きで確定します。
+
 ## テスト
 
 ```powershell

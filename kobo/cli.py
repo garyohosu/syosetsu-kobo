@@ -9,6 +9,7 @@ from .orchestrator import Config, DummyAdapter, KoboError, Orchestrator, load_ag
 from .gemini import GeminiAdapter, GeminiError
 from .urs import UrsManager
 from .concept import ConceptManager
+from .story_design import StoryDesignManager
 
 
 def parser() -> argparse.ArgumentParser:
@@ -38,6 +39,11 @@ def parser() -> argparse.ArgumentParser:
     for name in ("concept-hold","concept-reject-all","concept-regenerate"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
     revise=sub.add_parser("concept-revise"); revise.add_argument("candidate_id"); revise.add_argument("--instructions",type=Path,required=True); revise.add_argument("--work"); revise.add_argument("--session")
+    for name in ("story-start", "story-resume", "story-status"):
+        command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    show=sub.add_parser("story-show"); show.add_argument("kind", choices=("bible_draft","bible_audit","plot_draft","plot_audit","bible","plot")); show.add_argument("--work"); show.add_argument("--session")
+    for name in ("story-approve-bible", "story-finalize-bible", "story-start-plot", "story-approve-plot", "story-finalize-plot"):
+        command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
     return root
 
 
@@ -87,6 +93,17 @@ def main(argv: list[str] | None = None) -> int:
             task.write_text("# 接続確認\n\nこれは機密情報や小説本文を含まない接続テストです。日本語で「接続確認成功」とだけ回答してください。\n", encoding="utf-8")
             refs = {"task_path":str(task),"output_path":str(output),"model":args.model or config.models.get("gemini",agent.model),"run_id":run_id,"run_dir":str(run_dir),"agent_path":str(agent.path),"mail_db":str(config.mail_db),"mail_id":"diagnostic"}
             result = adapter.smoke(agent, refs, output)
+        elif args.command.startswith("story-"):
+            manager=StoryDesignManager(orchestrator,dummy=args.dummy)
+            if args.command=="story-start": result=manager.start(args.work)
+            elif args.command=="story-resume": result=manager.resume(args.work,args.session)
+            elif args.command=="story-status": result=manager.status(args.work,args.session)
+            elif args.command=="story-show": result=manager.show(args.kind,args.work,args.session)
+            elif args.command=="story-approve-bible": result=manager.approve("bible",args.work,args.session)
+            elif args.command=="story-finalize-bible": result=manager.finalize_bible(args.work,args.session)
+            elif args.command=="story-start-plot": result=manager.start_plot(args.work,args.session)
+            elif args.command=="story-approve-plot": result=manager.approve("plot",args.work,args.session)
+            else: result=manager.finalize_plot(args.work,args.session)
         elif args.command.startswith("concept-"):
             manager=ConceptManager(orchestrator,dummy=args.dummy)
             if args.command=="concept-start": result=manager.start(args.work,args.count)

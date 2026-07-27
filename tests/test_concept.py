@@ -13,8 +13,10 @@ class ConceptManagerTest(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name); agents=self.root/"agents"; agents.mkdir()
         (agents/"urs-maker.md").write_text(definition("urs-maker",next_agent="planner"),encoding="utf-8")
-        (agents/"planner.md").write_text(definition("planner","gemini","writer",["concept-planning"]),encoding="utf-8")
+        (agents/"planner.md").write_text(definition("planner","gemini","story-architect",["concept-planning"]),encoding="utf-8")
         (agents/"concept-reviewer.md").write_text(definition("concept-reviewer",next_agent="planner"),encoding="utf-8")
+        (agents/"story-architect.md").write_text(definition("story-architect","gemini","continuity-reviewer",["story-bible-design"]),encoding="utf-8")
+        (agents/"continuity-reviewer.md").write_text(definition("continuity-reviewer",next_agent="story-architect"),encoding="utf-8")
         (agents/"writer.md").write_text(definition("writer","gemini",None,["prose-writing"]),encoding="utf-8")
         self.config_path=self.root/"kobo.json"; self.config_path.write_text(json.dumps({"store":".state","state_db":".state/state.db","mail_db":".state/mail.db","agents_dir":"agents","first_agent":"urs-maker","commands":{"dummy":["dummy"],"gemini":["gemini"]}}),encoding="utf-8")
         self.orch=Orchestrator(Config.load(self.config_path)); self.counter=0
@@ -84,7 +86,8 @@ class ConceptManagerTest(unittest.TestCase):
         self.manager.action("select","C01",work_id=self.work_id); final=self.manager.finalize(self.work_id)
         with self.orch.mail.connection() as db:
             rows=db.execute("SELECT sender_id,recipient_id,parent_message_id,conversation_id FROM messages WHERE conversation_id=? ORDER BY id",(f"work-{self.work_id}",)).fetchall()
-        self.assertGreaterEqual(len(rows),5); self.assertTrue(all(row["conversation_id"]==f"work-{self.work_id}" for row in rows)); self.assertIsNotNone(final["mail_id"]); self.assertFalse(final["next_stage_implemented"])
+        self.assertGreaterEqual(len(rows),5); self.assertTrue(all(row["conversation_id"]==f"work-{self.work_id}" for row in rows)); self.assertIsNotNone(final["mail_id"]); self.assertTrue(final["next_stage_implemented"])
+        self.assertEqual(rows[-1]["recipient_id"],"story-architect")
 
     def test_invalid_count_unknown_candidate_and_path_traversal(self):
         work=self.make_work(); manager=ConceptManager(self.orch,dummy=True)

@@ -51,3 +51,17 @@ python mail/agent_mail.py send \
 - 返信は、その内容に基づく処理が終わってから既読にする。
 - 返信に対してさらに回答が必要なら、元メールを再利用せず新しいメールを送る。
 - エラーになった処理を、完了したものとして扱わない。
+
+## ワーカーとして起動する場合
+
+AIプロセスを待機中に常駐させず、Pythonワーカーがメール到着時だけハンドラーを起動する構成も利用できる。
+ワーカーは一度に1件だけ排他的に取得し、成功時は`completed`、失敗時は再試行または`failed`へ遷移させる。
+
+```bash
+python mail/agent_mail.py worker-loop \
+  --agent <自分のID> --interval 1 --max-retries 3 --timeout 300 \
+  --stale-after 900 --max-hops 10 --command <許可済みCLI> <固定引数>
+```
+
+本文はCLIの標準入力へ渡されるだけで、シェルコマンドとして解釈されない。
+停止時はCtrl+Cを使うか、Python APIの`Worker.stop()`を呼び出す。

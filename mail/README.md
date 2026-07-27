@@ -102,6 +102,41 @@ for item in mail.iter_work("writer"):
 `create_answer`と`process_reply`は、それぞれのAIエージェント側で実装します。
 このシステムは連絡の保存・順序付け・既読管理のみを担当します。
 
+## μITRON型ワーカー
+
+メール処理をエージェントの常駐AIプロセスから分離する場合は、Pythonワーカーを待機させ、
+メールを1件取得したときだけ登録済みハンドラーまたはCLIを起動します。状態は既読とは別に
+`pending`、`processing`、`completed`、`failed`で管理されます。
+
+```python
+from mail.agent_mail import AgentMail, HandlerRegistry, Worker, WorkerConfig
+
+mail = AgentMail("mail/agent_mail.db")
+registry = HandlerRegistry()
+registry.register("default", lambda item, context: print(item.body))
+worker = Worker(mail, "reviewer", registry, WorkerConfig(
+    max_retries=3, timeout=60, poll_interval=1, stale_after=900,
+    max_hops=10, escalation_agent_id="manager",
+))
+worker.run()                 # Ctrl+Cの前に worker.stop() で安全停止
+```
+
+ハンドラーから送信するメールは系列ID、親メールID、ホップ数を自動的に引き継ぎます。
+ホップ数が上限を超えると処理を停止し、設定されたエージェントへエスカレーションします。
+
+CLIでは本文をシェルとして実行せず、指定したコマンドへ標準入力として渡します。
+コマンドは引数配列として起動され、`shell=True`は使いません。
+
+```bash
+python mail/agent_mail.py worker-once --agent reviewer --timeout 60 --max-retries 3 --max-hops 10 --command python tools/handle_mail.py
+python mail/agent_mail.py worker-loop --agent reviewer --interval 2 --stale-after 900 --command python tools/handle_mail.py
+python mail/agent_mail.py recover --stale-after 900 --agent reviewer
+python mail/agent_mail.py worker-status --agent reviewer
+```
+
+既存DBは`PRAGMA user_version`（現在2）を使って初期化時に列と索引を冪等に追加します。
+既存の既読・返信APIは維持され、既読と処理完了は別状態です。
+
 ## テスト
 
 ```bash

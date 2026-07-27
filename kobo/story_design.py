@@ -173,6 +173,6 @@ class StoryDesignManager:
     def finalize_plot(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id); result=self._finalize("plot",session); session=self._session(session["work_id"],session["session_id"]); parent=session["bible_mail_id"]
         if parent:
-            mail_id=self.orchestrator.mail.send("plotter","writer",f"全体プロット確定 work_id={session['work_id']} plot_path={result['path']} 次工程=本文設計（未実装）",parent_message_id=parent); result["mail_id"]=mail_id
-        with self.orchestrator.connection() as db: db.execute("UPDATE works SET current_agent='plotter',next_agent='writer',status='pending',updated_at=? WHERE work_id=?",(now(),session["work_id"]))
-        result.update({"next_agent":"writer","next_stage_implemented":False}); return result
+            mail_id=self.orchestrator.mail.send("plotter","scene-planner",f"全体プロット確定 work_id={session['work_id']} plot_path={result['path']} 次工程=章・シーン設計",parent_message_id=parent); result["mail_id"]=mail_id
+        with self.orchestrator.connection() as db: db.execute("UPDATE works SET current_agent='plotter',next_agent='scene-planner',status='pending',updated_at=? WHERE work_id=?",(now(),session["work_id"]))
+        result.update({"next_agent":"scene-planner","next_stage_implemented":True}); return result

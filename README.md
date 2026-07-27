@@ -128,6 +128,21 @@ py -3 -m kobo.cli story-finalize-plot --work my-story
 
 実運用では`story-architect`と`plotter`だけをGeminiへルーティングし、監査は別担当・別実行ID・別成果物にします。`story-resume`は完成済み成果物を再生成しません。監査は自動承認ではなく、利用者承認後だけ`STORY_BIBLE.vNNN.md`と`PLOT.vNNN.md`を非上書きで確定します。
 
+## 章・シーン設計と本文制作
+
+確定プロットから章単位で開始し、章設計、シーン設計、Geminiによる本文初稿、`prose-reviewer`による独立監査、Geminiによる対象箇所の改稿、差分再監査、利用者承認、版付き本文確定の順に進めます。
+
+```powershell
+py -3 -m kobo.cli --dummy manuscript-start 1 --title "第1章" --work my-story
+py -3 -m kobo.cli manuscript-show audit --work my-story
+py -3 -m kobo.cli manuscript-show revision --work my-story
+py -3 -m kobo.cli manuscript-show reaudit --work my-story
+py -3 -m kobo.cli manuscript-approve --work my-story
+py -3 -m kobo.cli manuscript-finalize --work my-story
+```
+
+`--dummy`は実際の小説を書かず、ダミー本文で状態と契約だけを検証します。実運用の初稿・改稿は`writer`のGeminiアダプター専任です。初稿、監査、改稿、再監査、確定本文は別ファイルで保存され、`manuscript-resume`は完成済み工程を再実行しません。監査だけでは確定せず、利用者承認後に`CHAPTER-NNN.vNNN.md`を非上書きで作ります。
+
 ## テスト
 
 ```powershell

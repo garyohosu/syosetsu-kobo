@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json, re, sqlite3, subprocess, time, uuid
+import json, platform, re, shutil, sqlite3, subprocess, time, uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +9,16 @@ from .orchestrator import KoboError, atomic_write, now, safe_path
 
 NAME=re.compile(r"^instruction-(\d{8})-(\d+)\.md$")
 ALLOWED={"instruction_path","result_path","review_path","test_report_path","diff_path","next_instruction_path","root","job_id","attempt"}
+
+def resolve_command(command:list[str])->list[str]:
+    """コマンド先頭要素をPATH（Windowsでは PATHEXT を含む）上の実行可能フルパスへ解決する。絶対パス・相対パス指定はshutil.whichがそのまま検証する。codex/claude/gemini/grok等どの外部CLIにも同様に適用される共通処理。"""
+    if not command:return command
+    name=command[0]; resolved=shutil.which(name)
+    if not resolved:raise KoboError(f"実行ファイルを解決できませんでした: command={name} platform={platform.system()} reason=PATH上に実行可能ファイルが見つかりません")
+    return [resolved,*command[1:]]
+
+def default_runner(command,**kwargs):
+    return subprocess.run(resolve_command(command),**kwargs)
 
 @dataclass(frozen=True)
 class DevLoopConfig:
@@ -20,7 +30,7 @@ class DevLoopConfig:
         return cls(root,p(data.get("instructions","instructions")),p(data.get("database",".kobo/devloop.db")),data.get("implement",[]),data.get("review",[]),data.get("generate_next",[]),data.get("tests",[["python","-m","unittest","discover","-v"]]),int(data.get("max_repairs",2)),int(data.get("max_cycles",3)),int(data.get("max_ai_calls",12)),float(data.get("max_cost_units",12)),int(data.get("timeout",1800)),int(data.get("max_elapsed",7200)))
 
 class DevLoop:
-    def __init__(self,config,runner=subprocess.run):self.config=config; self.runner=runner; self.initialize()
+    def __init__(self,config,runner=default_runner):self.config=config; self.runner=runner; self.initialize()
     def _db(self):return closing(sqlite3.connect(self.config.database))
     def initialize(self):
         self.config.database.parent.mkdir(parents=True,exist_ok=True)
@@ -51,17 +61,30 @@ class DevLoop:
         return (done.stdout or "")+(done.stderr or "")
     def _record(self,job,attempt,phase,status,detail=None):
         with self._db() as db:db.execute("INSERT INTO dev_attempts(job_id,attempt,phase,status,detail,created_at) VALUES(?,?,?,?,?,?)",(job,attempt,phase,status,(detail or "")[:1000],now()));db.commit()
+    def _claim_job(self,item):
+        name=Path(item["instruction"]).name; result=Path(item["result"]).name; stamp=now()
+        with self._db() as db:
+            row=db.execute("SELECT job_id,status FROM dev_jobs WHERE instruction=?",(name,)).fetchone()
+            if row is None:
+                job=f"dev-{uuid.uuid4().hex}"
+                db.execute("INSERT INTO dev_jobs VALUES(?,?,?,?,?,?,?,?)",(job,name,result,"running",1,None,stamp,stamp));db.commit();return job
+            job,status=row
+            if status=="blocked":
+                db.execute("UPDATE dev_jobs SET status='running',round=1,error=NULL,updated_at=? WHERE job_id=?",(stamp,job));db.commit();return job
+            if status=="stopped":raise KoboError(f"停止済みジョブのため自動再試行しません: instruction={name}")
+            raise KoboError(f"既に処理中または完了済みのジョブが存在します: instruction={name} status={status}")
     def _refs(self,item,job,attempt):
         run=self.config.database.parent/"devloop"/job; run.mkdir(parents=True,exist_ok=True); instruction=Path(item["instruction"]); m=NAME.fullmatch(instruction.name); next_number=max([int(x.group(2)) for p in self.config.instructions.glob("instruction-*.md") if (x:=NAME.fullmatch(p.name))] or [0])+1
         return {"instruction_path":str(instruction),"result_path":item["result"],"review_path":str(run/f"review-{attempt}.json"),"test_report_path":str(run/f"tests-{attempt}.txt"),"diff_path":str(run/f"diff-{attempt}.patch"),"next_instruction_path":str(self.config.instructions/f"instruction-{m.group(1)}-{next_number}.md"),"root":str(self.config.root),"job_id":job,"attempt":str(attempt)}
     def once(self,execute=False,publish=False,generate_next=True,deadline=None,budget=None):
         pending=self.discover()
         if not pending:return {"status":"idle"}
-        item=pending[0]; safe_path(self.config.root,item["instruction"],must_exist=True); job=f"dev-{uuid.uuid4().hex}"; refs=self._refs(item,job,1)
-        if not execute:return {"job_id":job,"status":"planned","implement_command":self._command(self.config.implement,refs,"実装AI"),"review_command":self._command(self.config.review,refs,"レビューAI")}
+        item=pending[0]; safe_path(self.config.root,item["instruction"],must_exist=True)
+        if not execute:
+            job=f"dev-{uuid.uuid4().hex}"; refs=self._refs(item,job,1)
+            return {"job_id":job,"status":"planned","implement_command":self._command(self.config.implement,refs,"実装AI"),"review_command":self._command(self.config.review,refs,"レビューAI")}
         if publish and self._run(["git","status","--porcelain"]).strip():raise KoboError("publish開始時の作業ツリーがクリーンではありません")
-        stamp=now()
-        with self._db() as db:db.execute("INSERT INTO dev_jobs VALUES(?,?,?,?,?,?,?,?)",(job,Path(item["instruction"]).name,Path(item["result"]).name,"running",1,None,stamp,stamp));db.commit()
+        job=self._claim_job(item)
         calls=0
         try:
             self._run(["git","pull","--ff-only"])

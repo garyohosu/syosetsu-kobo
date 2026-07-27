@@ -52,6 +52,7 @@ def parser() -> argparse.ArgumentParser:
     manuscript_show=sub.add_parser("manuscript-show"); manuscript_show.add_argument("kind",choices=("chapter_design","scene_design","draft","audit","revision","reaudit","final")); manuscript_show.add_argument("--work"); manuscript_show.add_argument("--session")
     dev_status=sub.add_parser("devloop-status"); dev_status.add_argument("--dev-config",type=Path,default=Path("devloop.json"))
     dev_once=sub.add_parser("devloop-once"); dev_once.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_once.add_argument("--execute",action="store_true"); dev_once.add_argument("--publish",action="store_true")
+    dev_run=sub.add_parser("devloop-run"); dev_run.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_run.add_argument("--execute",action="store_true"); dev_run.add_argument("--publish",action="store_true"); dev_run.add_argument("--max-cycles",type=int)
     return root
 
 
@@ -103,7 +104,9 @@ def main(argv: list[str] | None = None) -> int:
             result = adapter.smoke(agent, refs, output)
         elif args.command.startswith("devloop-"):
             loop=DevLoop(DevLoopConfig.load(args.dev_config))
-            result=loop.status() if args.command=="devloop-status" else loop.once(args.execute,args.publish)
+            if args.command=="devloop-status": result=loop.status()
+            elif args.command=="devloop-run": result=loop.run(args.execute,args.publish,args.max_cycles)
+            else: result=loop.once(args.execute,args.publish)
         elif args.command.startswith("manuscript-"):
             manager=ManuscriptManager(orchestrator,dummy=args.dummy)
             if args.command=="manuscript-start": result=manager.start(args.chapter,args.title,args.work)

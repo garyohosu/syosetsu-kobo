@@ -152,9 +152,11 @@ py -3 -m kobo.cli devloop-status
 py -3 -m kobo.cli devloop-once
 py -3 -m kobo.cli devloop-once --execute
 py -3 -m kobo.cli devloop-once --execute --publish
+py -3 -m kobo.cli devloop-run --execute --max-cycles 3
+py -3 -m kobo.cli devloop-run --execute --publish --max-cycles 3
 ```
 
-実装AIコマンド未設定、テスト・レビュー失敗、result未生成、Git失敗では停止します。既定設定のまま外部AIやGit書込みを実行することはありません。
+実装AI・レビューAI・次指示生成AIは`agents/dev-*.md`で責務を分離し、実コマンドは`devloop.json`へ明示設定します。レビューは`pass/revise/stop`のJSONを返し、`revise`は同じjob IDで上限まで修正、`stop`は仕様判断として停止します。サイクル数、修正回数、AI呼出数（費用単位）、経過時間を上限管理します。実装AIコマンド未設定、テスト・レビュー失敗、result未生成、Git競合・認証等のコマンド失敗では停止します。既定設定のまま外部AIやGit書込みを実行することはありません。
 
 ## テスト
 

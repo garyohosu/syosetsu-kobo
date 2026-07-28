@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,7 +29,7 @@ class DevLoopTest(unittest.TestCase):
             if command[0]=="implement":Path(command[2]).write_text("result",encoding="utf-8")
             elif command[0]=="review":Path(command[1]).write_text(json.dumps({"verdict":next(reviews),"reason":"check"}),encoding="utf-8")
             elif command[0]=="next":Path(command[1]).write_text("next task",encoding="utf-8")
-            return Result()
+            return Result() if command[:3] != ["git","status","--porcelain"] else type("StatusResult",(),{"returncode":0,"stdout":"","stderr":""})()
         result=DevLoop(DevLoopConfig.load(self.cfg),runner).run(True,False,1); self.assertEqual(result["results"][0]["attempts"],2); self.assertTrue((self.root/"instructions/instruction-20260727-2.md").is_file())
 
     def test_cycle_limit_is_enforced(self):
@@ -90,7 +91,7 @@ class ResolveCommandTest(unittest.TestCase):
         修正前は日本語Windowsでreader threadがUnicodeDecodeErrorで落ち、returncode=0のまま
         stdoutが空になり、git diffの内容が無言で消えていた。"""
         text="正史・台帳を更新する。差分が空になってはいけない。"
-        done=default_runner([sys.executable,"-c","import sys;sys.stdout.write(sys.argv[1])",text],
+        done=default_runner([sys.executable,"-c","import sys;sys.stdout.buffer.write(sys.argv[1].encode('utf-8'))",text],
                             text=True,capture_output=True,timeout=60,shell=False,check=False)
         self.assertEqual(done.returncode,0); self.assertEqual(done.stdout,text)
 
@@ -110,7 +111,7 @@ class RetryReuseTest(unittest.TestCase):
             if command[0]=="implement":Path(command[2]).write_text("result",encoding="utf-8")
             elif command[0]=="review":Path(command[1]).write_text(json.dumps({"verdict":"pass","reason":"ok"}),encoding="utf-8")
             elif command[0]=="next":Path(command[1]).write_text("next",encoding="utf-8")
-            return Result()
+            return Result() if command[:3] != ["git","status","--porcelain"] else type("StatusResult",(),{"returncode":0,"stdout":"","stderr":""})()
         return runner
     def test_retrying_blocked_job_does_not_violate_unique_constraint(self):
         loop=DevLoop(DevLoopConfig.load(self.cfg),self._passing_runner()); self._insert_job(loop,"dev-existing","blocked","前回のエラー")
@@ -145,5 +146,42 @@ class RetryReuseTest(unittest.TestCase):
         result=loop.once(True,False,True); self.assertEqual(result["status"],"passed"); self.assertTrue(Path(result["result"]).is_file())
         with loop._db() as db:row=db.execute("SELECT status,error FROM dev_jobs WHERE job_id=?",(result["job_id"],)).fetchone()
         self.assertEqual(row,("passed",None))
+
+class ReviewPatchIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name)
+        (self.root/"instructions").mkdir(); (self.root/".gitignore").write_text("state.db\n.kobo/\n",encoding="utf-8")
+        (self.root/"devloop.json").write_text(json.dumps({"instructions":"instructions","database":"state.db","implement":[],"review":[],"generate_next":[],"tests":[]}),encoding="utf-8")
+        (self.root/"tracked.txt").write_text("old\n",encoding="utf-8")
+        (self.root/"delete.txt").write_text("remove\n",encoding="utf-8")
+        (self.root/"staged.txt").write_text("base\n",encoding="utf-8")
+        self._git("init"); self._git("config","user.email","test@example.invalid"); self._git("config","user.name","Test"); self._git("add","."); self._git("commit","-m","base")
+        self.loop=DevLoop(DevLoopConfig.load(self.root/"devloop.json"))
+    def tearDown(self): self.temp.cleanup()
+    def _git(self,*args): return subprocess.run(["git",*args],cwd=self.root,text=True,encoding="utf-8",errors="strict",capture_output=True,check=True)
+    def test_real_temporary_git_index_contains_all_changes_without_mutating_index(self):
+        (self.root/"tracked.txt").write_text("新しい追跡済み本文\n",encoding="utf-8")
+        (self.root/"staged.txt").write_text("ステージ済み本文\n",encoding="utf-8"); self._git("add","staged.txt")
+        (self.root/"canon-日本語.md").write_text("新規日本語ファイルの本文\n",encoding="utf-8")
+        (self.root/"new.bin").write_bytes(bytes(range(256))); (self.root/"delete.txt").unlink()
+        (self.root/".kobo").mkdir(); (self.root/".kobo/ignored.sqlite").write_bytes(b"ignored")
+        before_status=self._git("status","--porcelain").stdout; before_cached=self._git("diff","--cached","--binary").stdout
+        patch=self.loop._build_review_patch()
+        after_status=self._git("status","--porcelain").stdout; after_cached=self._git("diff","--cached","--binary").stdout
+        self.assertTrue(patch); self.assertIn("diff --git a/tracked.txt b/tracked.txt",patch); self.assertIn("新しい追跡済み本文",patch)
+        self.assertIn("canon-日本語.md",patch); self.assertIn("新規日本語ファイルの本文",patch); self.assertIn("new file mode",patch)
+        self.assertTrue("GIT binary patch" in patch or "Binary files" in patch); self.assertIn("deleted file mode",patch); self.assertNotIn("ignored.sqlite",patch)
+        self.assertEqual(before_status,after_status); self.assertEqual(before_cached,after_cached)
+        self.assertFalse(list((self.root/".kobo").glob("review-index-*") if (self.root/".kobo").exists() else []))
+
+    def test_patch_failure_cleans_temporary_index(self):
+        (self.root/"new.txt").write_text("new",encoding="utf-8")
+        def fake_run(command,**kwargs):
+            if "status" in command and "--porcelain" in command: return subprocess.CompletedProcess(command,0,"?? new.txt\n","")
+            if command[0:2]==["git","diff"]: return subprocess.CompletedProcess(command,0,"","")
+            return subprocess.CompletedProcess(command,0,"","")
+        self.loop.runner=fake_run
+        with self.assertRaises(KoboError): self.loop._build_review_patch()
+        self.assertFalse(list(self.root.glob("review-index-*") ))
 
 if __name__=="__main__":unittest.main()

@@ -35,7 +35,12 @@ class GeminiAdapterTest(unittest.TestCase):
     def test_long_body_is_sent_on_stdin_and_saved(self):
         adapter=self.adapter(); adapter.execute(self.agent,self.refs,self.output)
         self.assertEqual(len(self.kwargs["input"]),100001); self.assertFalse(self.kwargs["shell"])
+        self.assertEqual(self.kwargs["encoding"],"utf-8"); self.assertEqual(self.kwargs["errors"],"strict")
         self.assertEqual(self.output.read_text(encoding="utf-8"),"# OK\n")
+
+    def test_invalid_utf8_from_gemini_is_diagnostic(self):
+        adapter=self.adapter(error=UnicodeDecodeError("utf-8",b"\xff",0,1,"invalid"))
+        with self.assertRaises(GeminiInvalidOutputError): adapter.execute(self.agent,self.refs,self.output)
 
     def test_not_installed(self):
         with self.assertRaises(GeminiNotInstalled): GeminiAdapter("definitely-missing-gemini-binary").execute(self.agent,self.refs,self.output)
@@ -65,6 +70,15 @@ class GeminiAdapterTest(unittest.TestCase):
         def runner(command,**kwargs): return responses.pop(0)
         result=GeminiAdapter(sys.executable,runner=runner).doctor()
         text=str(result); self.assertTrue(result["installed"]); self.assertNotIn("あ",text); self.assertNotIn("input",result)
+
+    def test_doctor_requests_strict_utf8(self):
+        calls=[]
+        responses=[subprocess.CompletedProcess([],0,"0.45.2\n",""),subprocess.CompletedProcess([],0,"--prompt stdin --model text"," ")]
+        def runner(command,**kwargs): calls.append(kwargs); return responses.pop(0)
+        result=GeminiAdapter(sys.executable,runner=runner).doctor()
+        self.assertTrue(result["installed"])
+        self.assertEqual([call["encoding"] for call in calls],["utf-8","utf-8"])
+        self.assertEqual([call["errors"] for call in calls],["strict","strict"])
 
 
 if __name__ == "__main__": unittest.main()

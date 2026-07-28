@@ -446,7 +446,7 @@ class SubprocessHandler:
         if not command: raise ValueError("command must not be empty")
         self.command, self.timeout = tuple(command), timeout
     def __call__(self, item: WorkItem, context: HandlerContext) -> object:
-        completed = subprocess.run(self.command, input=item.body, text=True, capture_output=True, timeout=self.timeout, shell=False, check=True)
+        completed = subprocess.run(self.command, input=item.body, text=True, encoding="utf-8", errors="strict", capture_output=True, timeout=self.timeout, shell=False, check=True)
         return completed.stdout
 
 

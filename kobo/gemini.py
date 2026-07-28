@@ -61,11 +61,13 @@ class GeminiAdapter:
         task_path = Path(refs["task_path"])
         prompt = task_path.read_text(encoding="utf-8")
         try:
-            completed = self.runner(self.command(agent, refs), input=prompt, text=True, capture_output=True, timeout=agent.timeout, shell=False, check=False)
+            completed = self.runner(self.command(agent, refs), input=prompt, text=True, encoding="utf-8", errors="strict", capture_output=True, timeout=agent.timeout, shell=False, check=False)
         except subprocess.TimeoutExpired as error:
             raise GeminiTimeoutError(f"Gemini CLIが{agent.timeout}秒でタイムアウトしました") from error
         except OSError as error:
             raise GeminiNotInstalled(f"Gemini CLIを起動できません: {self.executable}") from error
+        except UnicodeDecodeError as error:
+            raise GeminiInvalidOutputError("Gemini CLIのUTF-8出力を復号できません") from error
         if completed.returncode:
             diagnostic = (completed.stderr or completed.stdout or "").strip().lower()
             if any(marker in diagnostic for marker in self.AUTH_MARKERS):
@@ -85,9 +87,9 @@ class GeminiAdapter:
             return base
         try:
             command_name = launch_name(self.executable)
-            version = self.runner([command_name, "--version"], text=True, capture_output=True, timeout=timeout, shell=False, check=False)
-            help_result = self.runner([command_name, "--help"], text=True, capture_output=True, timeout=timeout, shell=False, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
+            version = self.runner([command_name, "--version"], text=True, encoding="utf-8", errors="strict", capture_output=True, timeout=timeout, shell=False, check=False)
+            help_result = self.runner([command_name, "--help"], text=True, encoding="utf-8", errors="strict", capture_output=True, timeout=timeout, shell=False, check=False)
+        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as error:
             return {**base, "error": type(error).__name__}
         help_text = (help_result.stdout or "") + (help_result.stderr or "")
         return {**base, "version": (version.stdout or version.stderr or "").strip()[:100], "headless": "--prompt" in help_text, "stdin": "stdin" in help_text.lower(), "model_option": "--model" in help_text, "output_formats": [item for item in ("text", "json", "stream-json") if item in help_text], "version_exit_code": version.returncode, "help_exit_code": help_result.returncode}

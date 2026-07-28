@@ -226,6 +226,15 @@ class AgentMailTest(unittest.TestCase):
         self.mailbox.fail(claimed, "timeout", retry=False)
         self.assertIsNotNone(item)
 
+    def test_subprocess_handler_round_trip_is_utf8(self) -> None:
+        message_id = self.mailbox.send("writer", "reviewer", "日本語のメール本文")
+        item = self.mailbox.claim_next("reviewer")
+        self.assertIsNotNone(item)
+        handler = SubprocessHandler((sys.executable, "-c", "import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write((data.decode('utf-8') + '・応答').encode('utf-8'))"))
+        result = handler(item, HandlerContext(self.mailbox, item, "reviewer"))
+        self.assertEqual(result, "日本語のメール本文・応答")
+        self.assertIsNotNone(message_id)
+
     def test_auto_registration_does_not_overwrite_existing_attributes(self) -> None:
         self.mailbox.ensure_agent("other", "Original")
         self.mailbox.ensure_agent("other", "New")

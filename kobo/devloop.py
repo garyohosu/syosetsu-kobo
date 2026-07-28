@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json, platform, re, shutil, sqlite3, subprocess, time, uuid
+import json, os, platform, re, shutil, sqlite3, subprocess, tempfile, time, uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,10 +62,45 @@ class DevLoop:
             if not fields<=ALLOWED:raise KoboError(f"{label}コマンドに未知の参照があります: {fields-ALLOWED}")
             command.append(part.format(**refs))
         return command
-    def _run(self,command):
-        done=self.runner(command,cwd=self.config.root,text=True,capture_output=True,timeout=self.config.timeout,shell=False,check=False)
+    def _run(self,command,**runner_options):
+        options={"cwd":self.config.root,"text":True,"capture_output":True,"timeout":self.config.timeout,"shell":False,"check":False}
+        options.update(runner_options)
+        done=self.runner(command,**options)
         if done.returncode:raise KoboError(f"コマンド失敗 exit={done.returncode}")
         return (done.stdout or "")+(done.stderr or "")
+    def _build_review_patch(self):
+        """HEAD対作業ツリーの完全なレビュー差分を実インデックスへ触れずに作る。"""
+        status=self._run(["git","-c","core.quotePath=false","status","--porcelain"])
+        index_dir=self.config.database.parent
+        index_dir.mkdir(parents=True,exist_ok=True)
+        fd,index_name=tempfile.mkstemp(prefix="review-index-",dir=index_dir)
+        os.close(fd)
+        index_path=Path(index_name)
+        try:
+            index_path.unlink()
+        except FileNotFoundError:
+            pass
+        env=os.environ.copy()
+        env["GIT_INDEX_FILE"]=str(index_path)
+        try:
+            self._run(["git","read-tree","HEAD"],env=env)
+            self._run(["git","add","-A","-N","--","."],env=env)
+            patch=self._run(["git","-c","core.quotePath=false","diff","--binary","--","."],env=env)
+            if status.strip() and not patch:
+                raise KoboError("作業ツリーに変更があるのにレビュー用パッチが空です")
+            untracked=[line[3:] for line in status.splitlines() if line.startswith("?? ")]
+            normalized=patch.replace("\\","/")
+            for path in untracked:
+                path=path.replace("\\","/")
+                if f"diff --git a/{path} b/{path}" not in normalized:
+                    raise KoboError(f"未追跡ファイルがレビュー用パッチに含まれていません: {path}")
+            return patch
+        finally:
+            for path in (index_path, Path(str(index_path)+".lock")):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
     def _record(self,job,attempt,phase,status,detail=None):
         with self._db() as db:db.execute("INSERT INTO dev_attempts(job_id,attempt,phase,status,detail,created_at) VALUES(?,?,?,?,?,?)",(job,attempt,phase,status,(detail or "")[:1000],now()));db.commit()
     def _claim_job(self,item):
@@ -90,7 +125,7 @@ class DevLoop:
         if not execute:
             job=f"dev-{uuid.uuid4().hex}"; refs=self._refs(item,job,1)
             return {"job_id":job,"status":"planned","implement_command":self._command(self.config.implement,refs,"実装AI"),"review_command":self._command(self.config.review,refs,"レビューAI")}
-        if publish and self._run(["git","status","--porcelain"]).strip():raise KoboError("publish開始時の作業ツリーがクリーンではありません")
+        if self._run(["git","status","--porcelain"]).strip():raise KoboError("実行開始時の作業ツリーがクリーンではありません")
         job=self._claim_job(item)
         calls=0
         try:
@@ -102,7 +137,7 @@ class DevLoop:
                 self._run(self._command(self.config.implement,refs,"実装AI"));self._record(job,attempt,"implement","passed")
                 reports=[]
                 for command in self.config.tests:reports.append(self._run(command))
-                atomic_write(Path(refs["test_report_path"]),"\n".join(reports));atomic_write(Path(refs["diff_path"]),self._run(["git","diff","--binary"]));self._run(["git","diff","--check"])
+                atomic_write(Path(refs["test_report_path"]),"\n".join(reports));atomic_write(Path(refs["diff_path"]),self._build_review_patch());self._run(["git","diff","--check"])
                 calls+=1; self._run(self._command(self.config.review,refs,"レビューAI")); review_path=Path(refs["review_path"])
                 if not review_path.is_file():raise KoboError("レビューAIが判定JSONを作成しませんでした")
                 verdict=json.loads(review_path.read_text(encoding="utf-8")); decision=verdict.get("verdict");self._record(job,attempt,"review",decision,verdict.get("reason"))

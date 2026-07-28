@@ -94,7 +94,7 @@ py -3 -m kobo.cli --config kobo.json --dummy urs-finalize --work my-story
 
 ## 複数企画候補の生成・比較・選択
 
-確定済み`URS.vNNN.md`から既定3案を作り、生成担当とは別の`concept-reviewer`が比較します。候補数はCLIで1〜5に変更できます。この範囲は比較時の認知負荷と候補の多様性を両立する仮仕様です。
+確定済み`URS.vNNN.md`または読者プロファイルから既定5案を作り、生成担当とは別の`concept-reviewer`が比較します。候補数はCLIで1〜5に変更できます。候補は編集会議用の短い8項目ラフで、`concept-board`が画像なし・通信なしのカードHTMLを作ります。利用者が選択・確定するまでストーリー設計、本文、挿絵へ進みません。
 
 ```powershell
 py -3 -m kobo.cli --config kobo.json --dummy concept-start --work my-story --count 3
@@ -102,6 +102,7 @@ py -3 -m kobo.cli --config kobo.json --dummy concept-status --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-list --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-show C01 --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-compare --work my-story
+py -3 -m kobo.cli --config kobo.json --dummy concept-board --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-select C02 --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-preview --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-finalize --work my-story

@@ -162,6 +162,9 @@ class VisualPublisher:
 """
 
     def start(self, chapter_number, work_id):
+        feedback = self._root() / "novels" / work_id / "READER_FEEDBACK.v001.md"
+        if not feedback.is_file() or "不採用" in feedback.read_text(encoding="utf-8"):
+            raise VisualPublishError("本文の人間評価が合格するまで挿絵生成を開始できません")
         work=self._work(work_id); source,document_id=self._source(work_id, chapter_number); raw=source.read_text(encoding="utf-8"); digest=hashlib.sha256(raw.encode("utf-8")).hexdigest()
         with self.orchestrator.connection() as db:
             existing=db.execute("SELECT * FROM visual_sessions WHERE work_id=? AND chapter_number=?",(work_id,chapter_number)).fetchone()

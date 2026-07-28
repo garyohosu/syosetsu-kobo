@@ -29,9 +29,9 @@ class ConceptManagerTest(unittest.TestCase):
         urs=UrsManager(self.orch); session=urs.start(work_id); urs.answer("work-name","架空作品",work_id=work_id); urs.finalize(work_id,session["session_id"])
         return work_id
 
-    def test_default_three_candidates_from_versioned_urs(self):
-        self.assertEqual((self.result["generated"],self.result["evaluated"]),(3,3)); self.assertEqual(self.result["urs_version"],1)
-        candidates=self.manager.candidates(self.work_id); self.assertEqual(len(candidates),3); self.assertEqual(len({c["candidate_id"] for c in candidates}),3)
+    def test_default_five_candidates_from_versioned_urs(self):
+        self.assertEqual((self.result["generated"],self.result["evaluated"]),(5,5)); self.assertEqual(self.result["urs_version"],1)
+        candidates=self.manager.candidates(self.work_id); self.assertEqual(len(candidates),5); self.assertEqual(len({c["candidate_id"] for c in candidates}),5)
 
     def test_candidate_artifacts_have_contract_and_fixed_urs(self):
         for candidate in self.manager.candidates(self.work_id):
@@ -41,7 +41,7 @@ class ConceptManagerTest(unittest.TestCase):
 
     def test_generation_and_evaluation_runs_are_separate(self):
         candidates=self.manager.candidates(self.work_id); evaluations=self.manager.comparisons(self.work_id)
-        self.assertEqual(len(evaluations),3); self.assertTrue({c["generation_run_id"] for c in candidates}.isdisjoint({e["evaluation_run_id"] for e in evaluations}))
+        self.assertEqual(len(evaluations),5); self.assertTrue({c["generation_run_id"] for c in candidates}.isdisjoint({e["evaluation_run_id"] for e in evaluations}))
         self.assertTrue(all(e["evaluator_id"]=="concept-reviewer" for e in evaluations))
 
     def test_all_comparison_axes_and_reasons_are_saved(self):
@@ -64,7 +64,7 @@ class ConceptManagerTest(unittest.TestCase):
 
     def test_regeneration_preserves_old_candidates(self):
         old_paths=[c["path"] for c in self.manager.candidates(self.work_id)]; regenerated=self.manager.action("regenerate",work_id=self.work_id)
-        self.assertNotEqual(regenerated["session_id"],self.result["session_id"]); self.assertTrue(all(Path(p).is_file() for p in old_paths)); self.assertEqual(regenerated["generated"],3)
+        self.assertNotEqual(regenerated["session_id"],self.result["session_id"]); self.assertTrue(all(Path(p).is_file() for p in old_paths)); self.assertEqual(regenerated["generated"],5)
 
     def test_revision_uses_file_and_history_is_append_only(self):
         instructions=self.root/"revision.md"; instructions.write_text("中心関係を強める。"*1000,encoding="utf-8")
@@ -80,7 +80,14 @@ class ConceptManagerTest(unittest.TestCase):
     def test_resume_skips_completed_generation_and_evaluation(self):
         before=[(c["candidate_id"],c["generation_run_id"]) for c in self.manager.candidates(self.work_id)]
         self.manager.resume(self.work_id); after=[(c["candidate_id"],c["generation_run_id"]) for c in self.manager.candidates(self.work_id)]
-        self.assertEqual(before,after); self.assertEqual(len(self.manager.comparisons(self.work_id)),3)
+        self.assertEqual(before,after); self.assertEqual(len(self.manager.comparisons(self.work_id)),5)
+
+    def test_editorial_board_contains_all_candidates_without_images_or_network(self):
+        board=self.manager.board(self.work_id)
+        text=Path(board["path"]).read_text(encoding="utf-8")
+        self.assertEqual(board["candidate_count"],5)
+        self.assertEqual(text.count('<article class="card">'),5)
+        self.assertNotIn("<img",text.lower()); self.assertNotIn("<script",text.lower()); self.assertNotIn("http://",text); self.assertNotIn("https://",text)
 
     def test_mail_lineage_tracks_handoff_start_compare_and_final(self):
         self.manager.action("select","C01",work_id=self.work_id); final=self.manager.finalize(self.work_id)

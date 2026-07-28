@@ -39,9 +39,13 @@ def parser() -> argparse.ArgumentParser:
     answer = sub.add_parser("urs-answer"); answer.add_argument("question_id"); answer.add_argument("answer"); answer.add_argument("--work"); answer.add_argument("--session"); answer.add_argument("--status", choices=("confirmed","provisional"), default="confirmed"); answer.add_argument("--evidence", choices=("user","known","ai_inference","source"), default="user"); answer.add_argument("--revise", action="store_true")
     defer = sub.add_parser("urs-defer"); defer.add_argument("question_id"); defer.add_argument("--work"); defer.add_argument("--session")
     history = sub.add_parser("urs-answer-history"); history.add_argument("question_id"); history.add_argument("--work"); history.add_argument("--session")
-    concept_start=sub.add_parser("concept-start"); concept_start.add_argument("--work"); concept_start.add_argument("--count",type=int,default=3)
+    concept_start=sub.add_parser("concept-start"); concept_start.add_argument("--work"); concept_start.add_argument("--count",type=int,default=5)
     for name in ("concept-status","concept-list","concept-compare","concept-history","concept-preview","concept-finalize","concept-resume"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    sub.add_parser("concept-board").add_argument("--work");
+    # concept-board also accepts --session; add it to the parser created above.
+    # argparse returns the same parser object, so configure it explicitly.
+    board_parser = sub.choices["concept-board"]; board_parser.add_argument("--session")
     detail=sub.add_parser("concept-show"); detail.add_argument("candidate_id"); detail.add_argument("--work"); detail.add_argument("--session")
     select=sub.add_parser("concept-select"); select.add_argument("candidate_id"); select.add_argument("--work"); select.add_argument("--session")
     for name in ("concept-hold","concept-reject-all","concept-regenerate"):
@@ -180,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command=="concept-list": result=manager.candidates(args.work,args.session)
             elif args.command=="concept-show": result=manager.candidate(args.candidate_id,args.work,args.session)
             elif args.command=="concept-compare": result=manager.comparisons(args.work,args.session)
+            elif args.command=="concept-board": result=manager.board(args.work,args.session)
             elif args.command=="concept-select": result=manager.action("select",args.candidate_id,work_id=args.work,session_id=args.session)
             elif args.command=="concept-hold": result=manager.action("hold",work_id=args.work,session_id=args.session)
             elif args.command=="concept-reject-all": result=manager.action("reject_all",work_id=args.work,session_id=args.session)

@@ -78,6 +78,8 @@ class CanonManager:
             raise KoboError("章番号は1以上です")
         work = self._work(work_id); manuscript,bible,plot,prior = self._sources(work["work_id"], chapter_number)
         timestamp = now(); session_id = f"canon-{uuid.uuid4().hex}"; source_mail = manuscript["latest_mail_id"]
+        if source_mail is None:
+            source_mail = self.orchestrator.mail.send("manager", "canon-updater", "正史・台帳更新開始 work_id=" + work["work_id"] + " chapter=" + str(chapter_number), conversation_id="work-" + work["work_id"])
         values = (session_id,work["work_id"],chapter_number,manuscript["chapter_title"],manuscript["path"],manuscript["version"],bible["path"],bible["version"],plot["path"],plot["version"],prior["path"] if prior else None,prior["version"] if prior else None,"drafting","dummy" if self.dummy else "gemini",source_mail,source_mail,None,None,timestamp,timestamp,None)
         with self.orchestrator.connection() as db:
             try:
@@ -129,9 +131,9 @@ class CanonManager:
         if existing:return existing
         directory=self._dir(session); directory.mkdir(parents=True,exist_ok=True); path=directory/f"audit.r{revision:03d}.md"; run_id=self.orchestrator._new_run_id(); agent_id="canon-auditor"; drafts=[self._artifact(session["session_id"],k,revision) for k in KINDS]
         if self.dummy:
-            body="# 正史・台帳独立監査\n\n- 監査アダプター: `dummy`（実Gemini監査ではない）\n\n"+"\n\n".join(f"## {axis}\n\n対象箇所: {drafts[0]['path']}\n根拠: 固定参照資料との照合。\n判定: 問題なし。\n深刻度: low" for axis in AXES)
+            body="# 正史・台帳独立監査\n\n- 監査アダプター: `dummy`（実Gemini監査ではない）\n\n"+"\n\n".join(f"## {axis}\n\n対象箇所: {drafts[0]['path']}\n根拠: 固定参照資料との照合。\n判定: 問題なし。\n深刻度: low" for axis in AUDIT_AXES)
         else:
-            task=directory/f"task-audit.r{revision:03d}.md"; paths="\n".join(f"{LABELS[k]}: {self._artifact(session['session_id'],k,revision)['path']}" for k in KINDS); atomic_write(task,f"# 正史・台帳独立監査\n\n草案を直接書き換えず、確定資料へ独立照合する。各軸に対象箇所、根拠、判定、深刻度、`## 結論`を記録する。\n草案:\n{paths}\n本文: {session['manuscript_path']}\nバイブル: {session['bible_path']}\nプロット: {session['plot_path']}\n直前台帳: {session['prior_canon_path'] or 'なし（空台帳）'}\n監査軸: {', '.join(AXES)}"); agent=self.orchestrator.agents[agent_id]; refs=self.orchestrator._refs(agent,run_id,directory,task,path,session["latest_mail_id"] or 0); self.orchestrator._adapter(agent).execute(agent,refs,path); body=path.read_text(encoding="utf-8")
+            task=directory/f"task-audit.r{revision:03d}.md"; paths="\n".join(f"{LABELS[k]}: {self._artifact(session['session_id'],k,revision)['path']}" for k in KINDS); atomic_write(task,f"# 正史・台帳独立監査\n\n草案を直接書き換えず、確定資料へ独立照合する。各軸に対象箇所、根拠、判定、深刻度、`## 結論`を記録する。\n草案:\n{paths}\n本文: {session['manuscript_path']}\nバイブル: {session['bible_path']}\nプロット: {session['plot_path']}\n直前台帳: {session['prior_canon_path'] or 'なし（空台帳）'}\n監査軸: {', '.join(AUDIT_AXES)}"); agent=self.orchestrator.agents[agent_id]; refs=self.orchestrator._refs(agent,run_id,directory,task,path,session["latest_mail_id"] or 0); self.orchestrator._adapter(agent).execute(agent,refs,path); body=path.read_text(encoding="utf-8")
         if "## 結論" not in body: body += "\n\n## 結論\n\n利用者承認待ち。監査だけでは確定しない。\n"
         atomic_write(path,body)
         with self.orchestrator.connection() as db: db.execute("INSERT INTO canon_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(session["session_id"],"audit",revision,str(path),run_id,agent_id,"completed",drafts[0]["path"],now())); db.execute("UPDATE canon_sessions SET generation_run_id=?,audit_run_id=?,updated_at=? WHERE session_id=?",(drafts[0]["run_id"],run_id,now(),session["session_id"]))
@@ -172,6 +174,8 @@ class CanonManager:
         if session["status"]!="awaiting_approval": raise KoboError("現在の状態では却下できません")
         instruction_path=str(safe_path(self.orchestrator.config.root,instructions,must_exist=True)) if instructions is not None else None
         with self.orchestrator.connection() as db: db.execute("INSERT INTO canon_actions(session_id,action,reason,instruction_path,created_at) VALUES(?,?,?,?,?)",(session["session_id"],"reject",reason,instruction_path,now())); db.execute("UPDATE canon_sessions SET status='revising',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
+        correction = self.orchestrator.mail.send("manager", "canon-updater", "正史・台帳修正指示 session_id=" + session["session_id"] + " reason=" + reason, conversation_id="work-" + session["work_id"])
+        with self.orchestrator.connection() as db: db.execute("UPDATE canon_sessions SET latest_mail_id=?,updated_at=? WHERE session_id=?", (correction, now(), session["session_id"]))
         return self.status(work_id,session_id)
 
     def finalize(self, work_id=None, session_id=None):
@@ -184,12 +188,14 @@ class CanonManager:
         for kind in KINDS:
             source=self._artifact(session["session_id"],kind)
             if not source: raise KoboError("5種の台帳草案が揃っていません")
-            path=self.o.config.store/"works"/session["work_id"]/"canon"/f"{LABELS[kind]}.v{version:03d}.md"
+            path=self.orchestrator.config.store/"works"/session["work_id"]/"canon"/f"{LABELS[kind]}.v{version:03d}.md"
             if path.exists(): raise KoboError("確定成果物の上書きを拒否しました")
             prior=session["prior_canon_path"] or "なし（第1章の空台帳）"; header=f"# {LABELS[kind]}\n\n- 版: {version}\n- 状態: 確定\n- work_id: `{session['work_id']}`\n- 章: {session['chapter_number']}\n- 参照本文: `{session['manuscript_path']}`（v{session['manuscript_version']:03d}、固定）\n- 参照バイブル: `{session['bible_path']}`（v{session['bible_version']:03d}、固定）\n- 参照プロット: `{session['plot_path']}`（v{session['plot_version']:03d}、固定）\n- 参照直前台帳: `{prior}`（v{session['prior_canon_version'] or 'なし'}、固定）\n\n"; atomic_write(path,header+Path(source["path"]).read_text(encoding="utf-8")); paths.append(str(path))
         timestamp=now()
-        with self.o.connection() as db:
+        with self.orchestrator.connection() as db:
             for kind,path in zip(KINDS,paths): db.execute("INSERT INTO canon_documents(session_id,kind,version,chapter_number,manuscript_version,prior_canon_version,path,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(session["session_id"],kind,version,session["chapter_number"],session["manuscript_version"],session["prior_canon_version"],path,self._artifact(session["session_id"],kind)["path"],timestamp))
             db.execute("UPDATE canon_sessions SET status='completed',updated_at=? WHERE session_id=?",(timestamp,session["session_id"])); db.execute("UPDATE works SET current_agent='canon-updater',next_agent='scene-planner',status='pending',updated_at=? WHERE work_id=?",(timestamp,session["work_id"]))
+        self._mail(session,"manager","canon-updater","正史・台帳確定通知 work_id=" + session["work_id"] + " chapter=" + str(session["chapter_number"]))
+        session = self._session(work_id, session_id)
         handoff=self._mail(session,"canon-updater","scene-planner",f"正史・台帳確定 work_id={session['work_id']} chapter={session['chapter_number']} 次工程=scene-planner plot_path={session['plot_path']} bible_path={session['bible_path']} canon_path={paths[0]} character_ledger_path={paths[1]} timeline_path={paths[2]} resource_ledger_path={paths[3]} foreshadowing_ledger_path={paths[4]}")
         return {"status":"completed","version":version,"paths":paths,"mail_id":handoff,"next_agent":"scene-planner","next_stage_implemented":True}

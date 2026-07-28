@@ -41,5 +41,8 @@
     ],
     "comparison": ".kobo/works/prototype-001/concepts/concept-4e6d3d9accf944a0b60d6012f7e2b284/comparison.md"
   },
-  "note": "この出版は企画の確定ではない。利用者の明示選択が必要。"
+  "note": "この出版は企画の確定ではない。利用者の明示選択が必要。",
+  "selection_status": "superseded-for-selection",
+  "selection_status_reason": "文字混入（ハングル2件・日本語間への英単語混入3件、5案中4案）があり、かつ第一試作後の最新読者評価をREADER_PROFILE.v002.mdへ反映する前に生成されたため。実Antigravity生成の履歴としては保持する。",
+  "superseded_by": "novels/prototype-001/editorial-board-v002"
 }

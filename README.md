@@ -112,7 +112,11 @@ py -3 -m kobo.cli --config kobo.json --dummy concept-finalize --work my-story
 
 実AI生成では、候補番号ごとに創作方向（恋愛／不思議な日常／秘密と約束／冒険／猫）を固定し、C02以降は既に合格した候補のログラインと中心人物をプロンプトへ渡して重複を防ぎます。出力は一旦`attempts/`へ受け、書式検証に合格したものだけを正式候補にします。失敗時は検証エラーを次のプロンプトへ渡して再試行し、上限に達したらダミーへ代替せず`failed`で停止します。
 
-`concept-publish`は編集会議成果物をGit追跡下の`novels/{work}/editorial-board-vNNN/`へ出版します。候補、評価、比較総括、HTML、`PROVENANCE.json`を保存し、絶対パスを残しません。出版は企画の確定ではなく、状態は`awaiting_selection`のままです。
+企画入力は、確定URSが無い作品では`novels/{work}/READER_PROFILE.vNNN.md`の**数値最大版**を使います。`v010`は`v002`より新しいと判定し、規則外のファイル名は無視します。過去に古い版で企画を作っていても、新しい版を置けば次のセッションはそちらを参照します。
+
+候補、評価、比較総括は、正式保存の前に文字品質を検証します。ハングル、Unicode置換文字（U+FFFD）、制御文字、日本語の語の間へ孤立した英語機能語（`木箱 of 底`のような表記）を拒否します。固有名詞、CLI名、モデル名、コードブロック内の英語は許可します。混入を検出した場合は、内容・人物・構造を変更せず該当箇所の文字だけを直すよう求める修復プロンプトで再試行し、上限到達時はダミーへ代替せず`failed`で停止します。
+
+`concept-publish`は編集会議成果物をGit追跡下の`novels/{work}/editorial-board-vNNN/`へ出版します。`index.html`、`candidates/`、`evaluations/`、`comparison.md`、`PROVENANCE.json`、`READER_PROFILE_USED.md`を保存し、絶対パスを残しません。`--selection-note`で前版を選定対象外とした理由をHTML冒頭へ表示できます。出版は企画の確定ではなく、状態は`awaiting_selection`のままです。
 
 選択以外に`concept-hold`、`concept-reject-all`、`concept-regenerate`があります。長い修正指示はargvへ載せず、`concept-revise C02 --instructions revision.md`でUTF-8 MarkdownまたはJSONのパスを渡します。`concept-history`は選択・修正履歴、`concept-resume`は中断後の未完了地点を返します。
 

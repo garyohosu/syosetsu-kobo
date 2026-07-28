@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kobo.concept import CANDIDATE_DIRECTIONS, EVALUATION_AXES, POSITION_MARKERS, REQUIRED_CANDIDATE_HEADINGS, ConceptManager
+from kobo.concept import (CANDIDATE_DIRECTIONS, EVALUATION_AXES, POSITION_MARKERS, QUALITY_ERROR,
+                          REQUIRED_CANDIDATE_HEADINGS, ConceptManager, latest_reader_profile, text_quality_problems)
 from kobo.orchestrator import Adapter, Config, KoboError, Orchestrator, atomic_write
 from kobo.urs import UrsManager
 from tests.test_orchestrator import definition
@@ -45,6 +46,8 @@ class RecordingAgyAdapter(Adapter):
         self.prompts = []
         self.candidate_failures = 0
         self.always_fail_candidates = False
+        self.contaminate_candidates = 0
+        self.always_contaminate = False
 
     def command(self, agent, refs): return ["agy", "--print", "<prompt>"]
 
@@ -56,10 +59,18 @@ class RecordingAgyAdapter(Adapter):
                 atomic_write(output_path, "# 比較総括\n\n## 各案の違い\n\n案ごとに読書体験が異なる。\n\n## 補助順位\n\n根拠付きの順位。\n\n## 利用者へ確認したい点\n\n判断を仰ぐ。\n"); return
             # 候補番号が大きいほど高得点にし、順位が候補番号順にならないことを検証できるようにする。
             atomic_write(output_path, evaluation_markdown(int(re.search(r"企画候補 C(\d+)", prompt).group(1)))); return
+        if "修復対象" in prompt:  # 文字混入の修復要求。内容を変えずに直した体で返す。
+            ordinal = int(re.search(r"企画候補 C(\d+)", prompt).group(1))
+            fixed = candidate_markdown(ordinal)
+            if self.always_contaminate: fixed = fixed.replace("その場の問題には", "その場 of 問題には", 1)
+            atomic_write(output_path, fixed); return
         ordinal = int(re.search(r"候補C(\d+)", prompt).group(1))
         if self.always_fail_candidates or self.candidate_failures > 0:
             if not self.always_fail_candidates: self.candidate_failures -= 1
             atomic_write(output_path, "# 企画候補 C01: 書式不正\n\n## ログライン\n\n見出しが足りない。\n"); return
+        if self.always_contaminate or self.contaminate_candidates > 0:
+            if not self.always_contaminate: self.contaminate_candidates -= 1
+            atomic_write(output_path, candidate_markdown(ordinal).replace("その場の問題には", "その場 of 問題には", 1)); return
         atomic_write(output_path, candidate_markdown(ordinal))
 
 OLD_FORMAT_CANDIDATE = """# 企画候補 C01: 旧仕様の候補
@@ -340,6 +351,57 @@ class ConceptManagerTest(unittest.TestCase):
         status=[c["status"] for c in manager.candidates(work)]
         self.assertEqual(status[0],"generated:attempt=2")
 
+    def test_contaminated_candidate_triggers_repair_retry_and_is_not_saved(self):
+        self.agy.contaminate_candidates=1
+        work,manager,result=self.real_session()
+        self.assertEqual(result["generated"],5)
+        planner=[p for agent_id,p in self.agy.prompts if agent_id=="planner"]
+        self.assertEqual(len(planner),6)
+        repair=planner[1]
+        self.assertIn("修復対象",repair); self.assertIn("その場 of 問題には",repair)
+        self.assertIn("一切変更しない",repair)
+        saved=Path(manager.candidates(work)[0]["path"]).read_text(encoding="utf-8")
+        self.assertEqual(text_quality_problems(saved),[])
+        attempts=Path(manager.candidates(work)[0]["path"]).parent/"attempts"
+        self.assertTrue((attempts/"c01-attempt-1.error.txt").is_file())
+        self.assertIn(QUALITY_ERROR,(attempts/"c01-attempt-1.error.txt").read_text(encoding="utf-8"))
+
+    def test_persistent_contamination_fails_without_dummy_fallback(self):
+        self.agy.always_contaminate=True
+        work=self.make_work(); manager=ConceptManager(self.orch,dummy=False)
+        with self.assertRaisesRegex(KoboError,"ダミーへ代替しません"): manager.start(work)
+        self.assertEqual(manager.status(work)["status"],"failed"); self.assertEqual(manager.candidates(work),[])
+
+    def test_stale_profile_registration_does_not_beat_newer_file(self):
+        """一度v001で企画を作った後にv002を置いたら、次のセッションはv002を使う。"""
+        work=self.make_work()
+        novels=self.root/"novels"/work; novels.mkdir(parents=True)
+        (novels/"READER_PROFILE.v001.md").write_text("旧プロファイル",encoding="utf-8")
+        with self.orch.connection() as db:
+            db.execute("UPDATE urs_documents SET status='draft' WHERE session_id IN (SELECT session_id FROM urs_sessions WHERE work_id=?)",(work,))
+        manager=ConceptManager(self.orch,dummy=False)
+        first=manager.start(work)
+        self.assertTrue(first["urs_path"].endswith("READER_PROFILE.v001.md"))
+        (novels/"READER_PROFILE.v002.md").write_text("最新プロファイル",encoding="utf-8")
+        second=manager.action("regenerate",work_id=work)
+        self.assertTrue(second["urs_path"].endswith("READER_PROFILE.v002.md"),second["urs_path"])
+        self.assertEqual(second["urs_version"],2)
+
+    def test_session_uses_latest_reader_profile(self):
+        work=self.make_work()
+        novels=self.root/"novels"/work; novels.mkdir(parents=True)
+        (novels/"READER_PROFILE.v001.md").write_text("旧プロファイル",encoding="utf-8")
+        (novels/"READER_PROFILE.v002.md").write_text("最新プロファイル",encoding="utf-8")
+        with self.orch.connection() as db:
+            db.execute("UPDATE urs_documents SET status='draft' WHERE session_id IN (SELECT session_id FROM urs_sessions WHERE work_id=?)",(work,))
+        manager=ConceptManager(self.orch,dummy=False); result=manager.start(work)
+        self.assertNotIn("v001",Path(result["urs_path"]).name)
+        self.assertTrue(result["urs_path"].endswith("READER_PROFILE.v002.md"))
+        self.assertEqual(result["urs_version"],2)
+        published=manager.publish(work)
+        used=(self.root/published["path"]/"READER_PROFILE_USED.md").read_text(encoding="utf-8")
+        self.assertIn("最新プロファイル",used); self.assertIn("READER_PROFILE.v002.md",used)
+
     def test_exhausted_retries_fail_without_dummy_fallback(self):
         self.agy.always_fail_candidates=True
         work=self.make_work(); manager=ConceptManager(self.orch,dummy=False)
@@ -355,18 +417,92 @@ class ConceptManagerTest(unittest.TestCase):
         self.assertIn("企画選定禁止",dummy)
 
     def test_publish_writes_tracked_artifacts_without_absolute_paths(self):
-        work,manager,_=self.real_session()
-        published=manager.publish(work)
+        work,manager,result=self.real_session()
+        published=manager.publish(work,selection_note="前版は選定対象外")
         target=self.root/published["path"]
         self.assertEqual(published["version"],1); self.assertEqual(published["status"],"awaiting_selection")
-        for name in ["index.html","comparison.md","PROVENANCE.json"]+[f"candidate-c{i:02d}.md" for i in range(1,6)]+[f"evaluation-c{i:02d}.md" for i in range(1,6)]:
-            self.assertTrue((target/name).is_file(),name)
+        names=["index.html","comparison.md","PROVENANCE.json","READER_PROFILE_USED.md"]
+        names+=[f"candidates/candidate-c{i:02d}.md" for i in range(1,6)]
+        names+=[f"evaluations/evaluation-c{i:02d}.md" for i in range(1,6)]
+        for name in names: self.assertTrue((target/name).is_file(),name)
         provenance=json.loads((target/"PROVENANCE.json").read_text(encoding="utf-8"))
         self.assertEqual(provenance["adapter"],"agy"); self.assertFalse(provenance["dummy"])
         self.assertEqual(len(provenance["candidate_run_ids"]),5); self.assertEqual(len(provenance["evaluation_run_ids"]),5)
-        for path in target.iterdir():
-            self.assertNotIn(str(self.root),path.read_text(encoding="utf-8"),path.name)
+        for path in target.rglob("*"):
+            if path.is_file(): self.assertNotIn(str(self.root),path.read_text(encoding="utf-8"),path.name)
+        index=(target/"index.html").read_text(encoding="utf-8")
+        self.assertIn("参照読者プロファイル",index); self.assertIn(Path(result["urs_path"]).name,index)
+        self.assertIn("前版は選定対象外",index); self.assertIn(published["session_id"],index)
         second=manager.publish(work); self.assertEqual(second["version"],2)
+        self.assertTrue((self.root/published["path"]/"index.html").is_file(),"v001が残っていない")
+
+
+class ReaderProfileSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(); self.dir=Path(self.temp.name)
+
+    def tearDown(self): self.temp.cleanup()
+
+    def write(self,*names):
+        for name in names: (self.dir/name).write_text("x",encoding="utf-8")
+
+    def test_missing_directory_and_no_profile(self):
+        self.assertEqual(latest_reader_profile(self.dir/"absent"),(None,0))
+        self.assertEqual(latest_reader_profile(self.dir),(None,0))
+
+    def test_v001_only_stays_compatible(self):
+        self.write("READER_PROFILE.v001.md")
+        path,version=latest_reader_profile(self.dir)
+        self.assertEqual((path.name,version),("READER_PROFILE.v001.md",1))
+
+    def test_v002_wins_over_v001(self):
+        self.write("READER_PROFILE.v001.md","READER_PROFILE.v002.md")
+        path,version=latest_reader_profile(self.dir)
+        self.assertEqual((path.name,version),("READER_PROFILE.v002.md",2))
+
+    def test_numeric_comparison_not_lexicographic(self):
+        self.write("READER_PROFILE.v002.md","READER_PROFILE.v010.md")
+        path,version=latest_reader_profile(self.dir)
+        self.assertEqual((path.name,version),("READER_PROFILE.v010.md",10))
+
+    def test_irregular_names_are_ignored(self):
+        self.write("READER_PROFILE.v001.md","READER_PROFILE.md","READER_PROFILE.vXX.md",
+                   "READER_PROFILE.v999.md.bak","READER_FEEDBACK.v009.md")
+        path,version=latest_reader_profile(self.dir)
+        self.assertEqual((path.name,version),("READER_PROFILE.v001.md",1))
+
+
+class TextQualityTest(unittest.TestCase):
+    def test_replacement_character_is_rejected(self):
+        self.assertTrue(any("U+FFFD" in p for p in text_quality_problems("木箱�の底")))
+
+    def test_hangul_is_rejected(self):
+        self.assertTrue(any("ハングル" in p for p in text_quality_problems("彼女의負担が軽減される")))
+
+    def test_isolated_english_between_japanese_is_rejected(self):
+        for sample in ("木箱 of 底から","街道 of 測量士","最小 of 最小の労力","彼女 the 負担"):
+            self.assertTrue(text_quality_problems(sample),sample)
+
+    def test_control_characters_are_rejected(self):
+        self.assertTrue(any("制御文字" in p for p in text_quality_problems("本文\x00です")))
+
+    def test_legitimate_ascii_and_code_are_not_rejected(self):
+        legit=("- adapter: `agy`\n- モデル: `Antigravity既定（--model未指定）`\n"
+               "- 実行ID: `run-20260728T114021.051331Z-f1b1d9eb06f9`\n"
+               "主人公はWebデザイナーで、CLIのAPIを設計している。\n"
+               "```python\nfor item in rows: print('of the and')\n```\n"
+               "英語のタイトルはRain of Stonesという。\n")
+        self.assertEqual(text_quality_problems(legit),[])
+
+    def test_published_v001_contamination_is_detected(self):
+        """instruction-21が報告した実際の混入を検出できることを固定する。"""
+        samples={"C02ハングル":"穏やかに微笑む姿へと変わり、彼女의負担が軽減される",
+                 "C02英語":"最小 of 最小の労力で解決する",
+                 "C03英語":"木箱 of 底から現れたのは",
+                 "C04英語":"街道 of 測量士として働く",
+                 "C05ハングル":"魔石に刻まれた刻印의謎を追う"}
+        for label,sample in samples.items():
+            self.assertTrue(text_quality_problems(sample),label)
 
 
 if __name__ == "__main__": unittest.main()

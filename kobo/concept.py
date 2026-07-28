@@ -16,14 +16,16 @@ REQUIRED_CANDIDATE_HEADINGS = ("ログライン", "一行コンセプト", "想�
 POSITION_MARKERS = ("員", "士", "官", "師", "職人", "秘書", "兵", "事務", "学生", "店主", "跡取り", "令嬢", "令息", "見習い", "記者", "探偵", "商人", "騎士", "王子", "王女", "教師", "社長", "部長", "課長", "主婦", "医者", "看護", "弁護",
                     # 「人」で終わる職業。単独の「人」は「二人」「他人」に誤反応するため複合語だけを列挙する。
                     "案内人", "整理人", "管理人", "料理人", "使用人", "番人", "世話人", "代書人", "支配人")
-# 候補番号ごとの創作方向。独立呼出しで5案が似ることを防ぐ（instruction-20 §7.2）。
+# 候補ごとに必ず含める読書体験。独立呼出しで5案が似ることを防ぐ（instruction-21 §7）。
+# ジャンル名を機械的に割り当てるのではなく、感情体験の軸を変えるための指定とする。
 CANDIDATE_DIRECTIONS = (
-    "恋愛またはラブコメ。人物同士の距離と誤解を主軸にする。",
-    "不思議な日常。日常へ異常を一つだけ持ち込み、その結果として人物関係が変わる。",
-    "秘密、約束、過去の選択。感情的な謎を主軸にする。",
-    "冒険または危機。危機の中の選択によって人物関係が変わる。",
-    "猫が中心的な役割を持つ。案内役や飾りではなく、物語の核に関わらせる。",
+    "人物同士の関係そのものが物語の中心にある案。事件ではなく、二人以上の関係の変化が読みどころになる。",
+    "感情的な秘密または約束が中心の案。誰が何を隠し、何を守ろうとしているかが物語を動かす。",
+    "不思議な日常、または猫が中心の案。日常へ一つだけ不思議を持ち込み、それが人物の感情を動かす。猫を出すなら案内役や飾りにしない。",
+    "冒険または危機が人物関係を変える案。危機は関係を変えるために使い、危機の攻略自体を読みどころにしない。",
+    "ラブコメまたは恋愛要素を含む案。距離、誤解、意識の変化を主軸にする。",
 )
+QUALITY_ERROR = "文字品質エラー"
 DUMMY_PROVENANCE = "テスト用ダミー。企画選定禁止"
 REAL_PROVENANCE = "実Antigravity"
 # ダミーセッションで拒否する操作（instruction-20 §5）。
@@ -34,6 +36,44 @@ ACTIONS = {"select", "hold", "reject_all", "regenerate", "revise"}
 
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex}"
+
+
+READER_PROFILE_PATTERN = re.compile(r"^READER_PROFILE\.v(\d+)\.md$")
+# 利用者向け日本語本文へ混入してはいけない文字。
+HANGUL_RANGE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
+CONTROL_RANGE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# 日本語の語と語の間へ孤立して現れる英語機能語（例:「木箱 of 底」「彼女 the 負担」）。
+_JA = r"぀-ヿ一-鿿ｦ-ﾟ"
+ISOLATED_LATIN = re.compile(rf"[{_JA}]\s*\b(of|the|and|or|in|on|at|to|for|with|by|from|as|is|are|was|were|a|an)\b\s*[{_JA}]", re.IGNORECASE)
+FENCED_BLOCK = re.compile(r"```.*?```", re.DOTALL)
+
+
+def latest_reader_profile(directory: Path):
+    """`READER_PROFILE.vNNN.md`の最大版を数値比較で選ぶ。規則外の名前は無視する。"""
+    best, best_version = None, -1
+    if not directory.is_dir(): return None, 0
+    for path in directory.iterdir():
+        match = READER_PROFILE_PATTERN.match(path.name)
+        if not match or not path.is_file(): continue
+        version = int(match.group(1))
+        if version > best_version: best, best_version = path, version
+    return best, (best_version if best else 0)
+
+
+def text_quality_problems(text: str) -> list[str]:
+    """利用者向け本文の文字混入を検出する。正当な英単語やコードは許可する。"""
+    problems = []
+    if "�" in text:
+        index = text.index("�")
+        problems.append(f"置換文字U+FFFDが混入しています: …{text[max(0, index - 12):index + 12]}…")
+    for match in HANGUL_RANGE.finditer(text):
+        problems.append(f"ハングル文字U+{ord(match.group()):04X}が混入しています: …{text[max(0, match.start() - 12):match.start() + 12]}…")
+    if CONTROL_RANGE.search(text):
+        problems.append("制御文字またはNULが混入しています")
+    # コードブロックの中は英語が正当なので検査対象から外す。
+    for match in ISOLATED_LATIN.finditer(FENCED_BLOCK.sub("", text)):
+        problems.append(f"日本語の間へ英単語『{match.group(1)}』が混入しています: …{match.group()}…")
+    return problems
 
 
 def _strip_code_fence(text: str) -> str:
@@ -94,16 +134,18 @@ class ConceptManager:
     def _latest_urs(self, work_id: str):
         with self.orchestrator.connection() as db:
             db.executescript("CREATE TABLE IF NOT EXISTS urs_sessions(session_id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES works(work_id), status TEXT NOT NULL, question_version TEXT NOT NULL, next_question_id TEXT, urs_status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_mail_id INTEGER); CREATE TABLE IF NOT EXISTS urs_documents(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL, path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(session_id, version));")
-            row=db.execute("SELECT d.id,d.version,d.path,s.session_id FROM urs_documents d JOIN urs_sessions s ON s.session_id=d.session_id WHERE s.work_id=? AND d.status='final' ORDER BY d.version DESC LIMIT 1",(work_id,)).fetchone()
+            # 読者プロファイル由来の行は除外する。除外しないと、過去に登録した古い版が
+            # 新しいREADER_PROFILE.vNNN.mdより優先されてしまう。
+            row=db.execute("SELECT d.id,d.version,d.path,s.session_id FROM urs_documents d JOIN urs_sessions s ON s.session_id=d.session_id WHERE s.work_id=? AND d.status='final' AND s.question_version<>'reader-profile' ORDER BY d.version DESC LIMIT 1",(work_id,)).fetchone()
         if not row:
-            profile = self.orchestrator.config.root / "novels" / work_id / "READER_PROFILE.v001.md"
-            if not profile.is_file(): raise KoboError("確定済みURSまたは読者プロファイルがありません")
-            timestamp = now(); sid = f"profile-{work_id}"
+            profile, profile_version = latest_reader_profile(self.orchestrator.config.root / "novels" / work_id)
+            if profile is None: raise KoboError("確定済みURSまたは読者プロファイルがありません")
+            timestamp = now(); sid = f"profile-{work_id}-v{profile_version:03d}"
             with self.orchestrator.connection() as db:
                 db.executescript("CREATE TABLE IF NOT EXISTS urs_sessions(session_id TEXT PRIMARY KEY, work_id TEXT NOT NULL REFERENCES works(work_id), status TEXT NOT NULL, question_version TEXT NOT NULL, next_question_id TEXT, urs_status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source_mail_id INTEGER); CREATE TABLE IF NOT EXISTS urs_documents(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL, path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(session_id, version));")
                 db.execute("INSERT OR IGNORE INTO urs_sessions VALUES(?,?,?,?,?,?,?,?,?)", (sid, work_id, "completed", "reader-profile", None, "final", timestamp, timestamp, None))
-                db.execute("INSERT OR IGNORE INTO urs_documents(session_id,version,status,path,created_at) VALUES(?,?,?,?,?)", (sid, 1, "final", str(profile.relative_to(self.orchestrator.config.root)), timestamp))
-                row = db.execute("SELECT id,version,path,session_id FROM urs_documents WHERE session_id=? AND version=1", (sid,)).fetchone()
+                db.execute("INSERT OR IGNORE INTO urs_documents(session_id,version,status,path,created_at) VALUES(?,?,?,?,?)", (sid, profile_version, "final", str(profile.relative_to(self.orchestrator.config.root)), timestamp))
+                row = db.execute("SELECT id,version,path,session_id FROM urs_documents WHERE session_id=? AND version=?", (sid, profile_version)).fetchone()
         path=safe_path(self.orchestrator.config.root,row["path"],must_exist=True)
         return row,path
 
@@ -238,6 +280,8 @@ class ConceptManager:
         people=[line for line in central.splitlines() if line.startswith("- ")]
         if not people: raise KoboError("中心人物が記載されていません")
         if len(people) > 3: raise KoboError(f"中心人物は3人以内です（{len(people)}人）")
+        problems=text_quality_problems("\n\n".join(sections[heading] for heading in REQUIRED_CANDIDATE_HEADINGS))
+        if problems: raise KoboError(QUALITY_ERROR+": "+" / ".join(problems))
 
     def _existing_summaries(self,session)->list[str]:
         """既に検証合格した候補の要約。C02以降の差別化に使う（instruction-20 §7.3）。"""
@@ -273,19 +317,46 @@ class ConceptManager:
                f"C{ordinal:02d}は次の方向で作ること: {CANDIDATE_DIRECTIONS[ordinal-1]}",
                "",
                "## 禁止事項",
+               "- 技術、実務、観察による問題解決を物語の主軸にすること。これらは人物ドラマを支える補助にとどめる。",
                "- 店、工房、修理、設備、制度改善、職業知識の披露を娯楽の中心に置くこと。",
+               "- 原因調査、測定、作業手順、制度の説明を長く描くこと。",
                "- 主人公が正解を説明し、周囲が感心するだけの展開。",
+               "- 主人公の専門能力そのものを主要な魅力にすること。",
                "- 事件に巻き込まれ、最後まで他人の指示に従うだけの主人公。",
                "- 第一話を未解決の謎だけで終わらせること。小さくても決着を置く。",
                "",
+               "判断基準: この企画から技術・仕事・観察の要素を抜いても人物ドラマが残ること。残らないなら不合格。",
+               "",
                "## 読者プロファイル（この読者に向けて作る）",
                profile]
+        parts += ["","## 文字の品質",
+                  "- 日本語の本文へ、ハングル（의など）、置換文字、制御文字を絶対に混入させない。",
+                  "- 日本語の語と語の間へ英語の機能語を挟まない。『木箱 of 底』『彼女의負担』のような表記は不可。",
+                  "- 英単語は固有名詞など必要な場合だけ使う。"]
         if existing:
             parts += ["","## 同じセッションで既に採用済みの候補（重複禁止）","\n".join(existing),"",
                       "上記と、主人公の願望、中心人物関係、ジャンル、感情的な読書体験、第一話の転換、連載の推進力のすべてで明確に異なる案にすること。題名や舞台だけを変えた同じ構造の案は不可。"]
         if feedback:
             parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
         return "\n".join(parts)
+
+    def _repair_prompt(self,problems,previous)->str:
+        """文字混入だけを直させる。内容・人物・構造は変更させない（instruction-21 §5）。"""
+        return "\n".join([
+            "次のMarkdownは、日本語本文へ不正な文字が混入しているため不合格です。",
+            "",
+            "## 検出箇所",
+            problems,
+            "",
+            "## 修復の指示",
+            "- 物語の内容、登場人物、構造、見出し、文字数を一切変更しない。",
+            "- 検出された混入文字だけを、文脈に合う自然な日本語へ直す。",
+            "- 新しい設定や表現を足さない。",
+            "- 出力はMarkdown本体のみ。前置き、コードフェンス、説明を付けない。",
+            "",
+            "## 修復対象",
+            previous,
+        ])
 
     def _run_agent(self,agent_id,prompt,output_path,run_id,session):
         agent=self.orchestrator.agents[agent_id]
@@ -310,10 +381,11 @@ class ConceptManager:
         agent=self.orchestrator.agents["planner"]; limit=max(1,min(agent.max_attempts,3))
         profile=Path(session["urs_path"]).read_text(encoding="utf-8").strip()
         existing=self._existing_summaries(session); attempts_dir=path.parent/"attempts"; attempts_dir.mkdir(parents=True,exist_ok=True)
-        feedback=None; failures=[]
+        feedback=None; failures=[]; repair_source=None
         for attempt in range(1,limit+1):
             raw_path=attempts_dir/f"c{ordinal:02d}-attempt-{attempt}.md"
-            prompt=self._candidate_prompt(session,ordinal,profile,existing,feedback)
+            # 文字混入だけが原因なら、作り直させず前回出力の修復を求める。
+            prompt=self._repair_prompt(feedback,repair_source) if repair_source else self._candidate_prompt(session,ordinal,profile,existing,feedback)
             try:
                 raw=self._run_agent("planner",prompt,raw_path,run_id,session)
                 text=self._normalize_candidate(session,ordinal,run_id,raw)
@@ -321,6 +393,7 @@ class ConceptManager:
                 return text,attempt
             except KoboError as error:
                 feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                repair_source=raw_path.read_text(encoding="utf-8") if (QUALITY_ERROR in feedback and raw_path.is_file()) else None
                 atomic_write(attempts_dir/f"c{ordinal:02d}-attempt-{attempt}.error.txt",f"{error}\n")
         raise KoboError(f"C{ordinal:02d}の実AI生成が{limit}回とも書式検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
 
@@ -351,6 +424,16 @@ class ConceptManager:
             "- 「5段階評価:」は 1〜5 の整数のみを書く。",
             "- 最後に `## 総評` を置き、この候補の採用可否ではなく、強みと不安を3文以内でまとめる。",
             "- 先読み欲求は、最後に謎を置いただけの引きより、途中から人物関係・願望・秘密が自然に動いて次を知りたくなる構造を高く評価する。",
+            "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。",
+            "",
+            "## 重く見る観点",
+            "この読者は第一試作を「引き込まれなかった」と評価している。次を特に重く判定すること。",
+            "- 人物関係と感情が主な面白さになっているか。技術・職業・設定説明へ逃げていないか。",
+            "- 主人公を追いたくなるか。性別・年齢層・立場・望みが冒頭で分かるか。",
+            "- 冒頭から読みたい理由があるか。",
+            "- 第一話の途中から自然に先が気になるか。最後の謎だけに頼っていないか。",
+            "- 第一試作と同じ『調査して解決して評価される』構造になっていないか。",
+            "読者プロファイルの『仮説』節は未確認の推定である。仮説への適合だけを理由に高得点を与えてはいけない。",
             "",
             "## 読者プロファイル",
             profile,
@@ -368,6 +451,8 @@ class ConceptManager:
         for label in ("根拠","長所","弱点","改善案"):
             if len(re.findall(rf"^{label}\s*[:：]",text,re.MULTILINE)) < len(EVALUATION_AXES):
                 raise KoboError(f"各軸に「{label}:」を書いてください")
+        problems=text_quality_problems(text)
+        if problems: raise KoboError(QUALITY_ERROR+": "+" / ".join(problems))
 
     def _evaluation_score(self,text: str)->int:
         return sum(int(value) for value in re.findall(r"5段階評価\s*[:：]\s*([1-5])",text))
@@ -392,12 +477,15 @@ class ConceptManager:
             try:
                 raw=self._run_agent("concept-reviewer",prompt,raw_path,run_id,session)
                 text=_strip_code_fence(raw); self._validate_evaluation(text)
+                # 検証を通ったので次のattemptは不要
                 header=(f"# 企画評価 {candidate['candidate_id']}\n\n- 生成種別: {REAL_PROVENANCE}\n- 評価担当: `concept-reviewer`\n"
                         f"- アダプター: `{session['adapter']}`\n- モデル: `{self._model_label('concept-reviewer')}`\n"
                         f"- 評価実行ID: `{run_id}`\n- 候補生成実行ID: `{candidate['generation_run_id']}`\n\n")
                 atomic_write(path,header+text+"\n"); return header+text+"\n"
             except KoboError as error:
-                failures.append(f"attempt {attempt}: {error}"); prompt=self._evaluation_prompt(candidate,profile)+f"\n\n## 前回出力の書式エラー（必ず直す）\n{error}"
+                failures.append(f"attempt {attempt}: {error}")
+                prompt=(self._repair_prompt(str(error),raw_path.read_text(encoding="utf-8")) if QUALITY_ERROR in str(error) and raw_path.is_file()
+                        else self._evaluation_prompt(candidate,profile)+f"\n\n## 前回出力の書式エラー（必ず直す）\n{error}")
                 atomic_write(attempts_dir/f"eval-c{candidate['ordinal']:02d}-attempt-{attempt}.error.txt",f"{error}\n")
         raise KoboError(f"C{candidate['ordinal']:02d}の実AI評価が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
 
@@ -423,9 +511,19 @@ class ConceptManager:
                               "- `## 各案の違い` に、候補ごとの読書体験の差を1行ずつ書く。",
                               "- `## 補助順位` に、根拠付きの順位を書く。候補番号をそのまま順位にしない。",
                               "- `## 利用者へ確認したい点` に、AIでは決められない判断を3点以内で書く。",
-                              "- 順位は補助情報であり自動選択には使わないと明記する。","",
+                              "- 順位は補助情報であり自動選択には使わないと明記する。",
+                              "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。","",
                               "## 候補一覧",digest])
-            raw=self._run_agent("concept-reviewer",prompt,self._comparison_path(session).with_name("comparison.raw.md"),run_id,session)
+            raw_path=self._comparison_path(session).with_name("comparison.raw.md")
+            limit=max(1,min(self.orchestrator.agents["concept-reviewer"].max_attempts,3)); failures=[]
+            for attempt in range(1,limit+1):
+                raw=self._run_agent("concept-reviewer",prompt,raw_path,run_id,session)
+                problems=text_quality_problems(_strip_code_fence(raw))
+                if not problems: break
+                failures.append(f"attempt {attempt}: {' / '.join(problems)}")
+                atomic_write(raw_path.with_name(f"comparison-attempt-{attempt}.error.txt"),"\n".join(problems)+"\n")
+                if attempt==limit: raise KoboError(f"比較総括が{limit}回とも{QUALITY_ERROR}で不合格でした（ダミーへ代替しません）: "+" / ".join(failures))
+                prompt=self._repair_prompt(" / ".join(problems),_strip_code_fence(raw))
             header=f"# 企画比較総括\n\n- 生成種別: {REAL_PROVENANCE}\n- アダプター: `{session['adapter']}`\n- モデル: `{self._model_label('concept-reviewer')}`\n- 比較実行ID: `{run_id}`\n\n"
             body=header+_strip_code_fence(raw)+"\n"
         atomic_write(path,body)
@@ -482,7 +580,7 @@ class ConceptManager:
         for row in rows: row["content"]=Path(row["path"]).read_text(encoding="utf-8")
         return rows
 
-    def board(self, work_id=None, session_id=None):
+    def board(self, work_id=None, session_id=None, *, selection_note=None):
         session=self._session(work_id,session_id)
         with self.orchestrator.connection() as db:
             rows=[dict(r) for r in db.execute("SELECT * FROM concept_candidates WHERE session_id=? ORDER BY ordinal",(session["session_id"],))]
@@ -510,8 +608,15 @@ class ConceptManager:
         path.parent.mkdir(parents=True,exist_ok=True)
         body="".join(cards)
         dummy=self._is_dummy_session(session)
-        notice=(f'<p class="notice">{html.escape(DUMMY_PROVENANCE)}：この一覧はテスト用fixtureです。企画選定には使えません。</p>' if dummy
-                else f'<p class="notice">{html.escape(REAL_PROVENANCE)}生成（アダプター: {html.escape(session["adapter"])} / モデル: {html.escape(self._model_label("planner"))}）</p>')
+        if dummy:
+            notice=f'<p class="notice">{html.escape(DUMMY_PROVENANCE)}：この一覧はテスト用fixtureです。企画選定には使えません。</p>'
+        else:
+            rows_html=[f"<li>参照読者プロファイル: <code>{html.escape(self._relative(session['urs_path']))}</code>（v{session['urs_version']:03d}、固定）</li>",
+                       f"<li>生成種別: {html.escape(REAL_PROVENANCE)}</li>",
+                       f"<li>adapter: <code>{html.escape(session['adapter'])}</code> / モデル: {html.escape(self._model_label('planner'))}</li>",
+                       f"<li>セッションID: <code>{html.escape(session['session_id'])}</code></li>"]
+            if selection_note: rows_html.append(f"<li>{html.escape(selection_note)}</li>")
+            notice='<div class="notice"><ul>'+"".join(rows_html)+"</ul></div>"
         comparison=self._comparison_path(session)
         summary_section=(f'<section class="comparison"><h2>AI比較総括（参考）</h2><p>順位は補助情報です。第一印象は上のカードで判断してください。</p><pre>{html.escape(comparison.read_text(encoding="utf-8"))}</pre></section>' if comparison.is_file() else "")
         page=f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>編集会議 - 企画比較</title><style>body{{margin:0;background:#f5f1ea;color:#28231f;font-family:system-ui,"Yu Gothic",sans-serif}}main{{max-width:1100px;margin:auto;padding:1rem}}.board{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}}.card{{background:#fff;border:1px solid #d8cec2;border-radius:12px;padding:1rem;box-shadow:0 2px 8px #0001}}pre{{white-space:pre-wrap;font:inherit;line-height:1.7;margin:0}}h1{{font-size:1.5rem}}h2{{font-size:1.1rem;border-bottom:2px solid #c96;padding-bottom:.4rem}}.summary{{background:#fbf6ee;border:1px solid #e6dccb;border-radius:8px;padding:.6rem .8rem;margin:.6rem 0;font-size:.92rem;line-height:1.6}}.summary p{{margin:.2rem 0}}.judge{{border-top:1px dashed #c9bda8;margin-top:.8rem;padding-top:.6rem;font-size:.92rem;line-height:1.8}}.judge p{{margin:.2rem 0}}.origin{{display:inline-block;background:#efe3cf;border:1px solid #d3bf9d;border-radius:999px;padding:.1rem .6rem;font-size:.8rem;margin:0 0 .4rem}}.notice{{background:#fff;border-left:4px solid #c96;padding:.6rem .8rem;border-radius:4px}}.comparison{{margin-top:1.5rem;background:#fff;border:1px solid #d8cec2;border-radius:12px;padding:1rem}}.comparison pre{{white-space:pre-wrap;font:inherit;line-height:1.7}}</style></head><body><main><h1>編集会議用 企画比較</h1>{notice}<p>候補を比較し、人間が面白そう・惜しい・保留・全却下を判断する。AI推奨だけでは制作へ進まない。</p><section class="board">{body}</section>{summary_section}</main></body></html>'''
@@ -522,11 +627,11 @@ class ConceptManager:
         if self._is_dummy_session(session):
             raise KoboError(f"ダミーセッションでは{operation}できません。ダミー候補はテスト専用のfixtureです。実AI生成セッション（adapter=agy）を作成してください（concept-regenerate）")
 
-    def publish(self,work_id=None,session_id=None):
+    def publish(self,work_id=None,session_id=None,*,selection_note=None):
         """編集会議成果物をGit追跡下へ出版する。企画の確定ではない（instruction-20 §10）。"""
         session=self._session(work_id,session_id)
         self._reject_dummy(session,"Git追跡下へ出版")
-        board=self.board(session["work_id"],session["session_id"])
+        board=self.board(session["work_id"],session["session_id"],selection_note=selection_note)
         with self.orchestrator.connection() as db:
             candidates=[dict(r) for r in db.execute("SELECT * FROM concept_candidates WHERE session_id=? ORDER BY ordinal",(session["session_id"],))]
             evaluations=[dict(r) for r in db.execute("SELECT e.*,c.ordinal FROM concept_evaluations e JOIN concept_candidates c ON c.candidate_id=e.candidate_id WHERE e.session_id=? ORDER BY c.ordinal",(session["session_id"],))]
@@ -537,17 +642,22 @@ class ConceptManager:
         target=base/f"editorial-board-v{version:03d}"; target.mkdir(parents=True)
         atomic_write(target/"index.html",Path(board["path"]).read_text(encoding="utf-8"))
         for candidate in candidates:
-            atomic_write(target/f"candidate-c{candidate['ordinal']:02d}.md",Path(candidate["path"]).read_text(encoding="utf-8"))
+            atomic_write(target/"candidates"/f"candidate-c{candidate['ordinal']:02d}.md",Path(candidate["path"]).read_text(encoding="utf-8"))
         for evaluation in evaluations:
-            atomic_write(target/f"evaluation-c{evaluation['ordinal']:02d}.md",Path(evaluation["path"]).read_text(encoding="utf-8"))
+            atomic_write(target/"evaluations"/f"evaluation-c{evaluation['ordinal']:02d}.md",Path(evaluation["path"]).read_text(encoding="utf-8"))
         comparison=self._comparison_path(session)
         if comparison.is_file(): atomic_write(target/"comparison.md",comparison.read_text(encoding="utf-8"))
+        profile_text=Path(session["urs_path"]).read_text(encoding="utf-8")
+        atomic_write(target/"READER_PROFILE_USED.md",
+                     f"# この編集会議で入力に使った読者プロファイル\n\n- 参照元: `{self._relative(session['urs_path'])}`\n"
+                     f"- 版: v{session['urs_version']:03d}（セッション開始時に固定）\n- セッションID: `{session['session_id']}`\n\n---\n\n{profile_text}")
         provenance={"session_id":session["session_id"],"work_id":session["work_id"],"adapter":session["adapter"],
                     "model":self._model_label("planner"),"evaluator_model":self._model_label("concept-reviewer"),"dummy":False,
                     "generated_at":now(),"status":session["status"],
                     "reader_profile":self._relative(session["urs_path"]),"reader_profile_version":session["urs_version"],
                     "candidate_run_ids":{f"C{c['ordinal']:02d}":c["generation_run_id"] for c in candidates},
                     "evaluation_run_ids":{f"C{e['ordinal']:02d}":e["evaluation_run_id"] for e in evaluations},
+                    "reader_profile_selection":"novels/{work}/READER_PROFILE.vNNN.mdの数値最大版",
                     "source_paths":{"board":self._relative(board["path"]),
                                     "candidates":[self._relative(c["path"]) for c in candidates],
                                     "evaluations":[self._relative(e["path"]) for e in evaluations],

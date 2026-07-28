@@ -168,3 +168,16 @@ py -3 -m compileall -q kobo mail tests
 ## 正史・台帳更新
 
 ダミー検証: py -3 -m kobo.cli --dummy canon-start 1 --work work-id。状態、草案・監査表示、承認、確定は canon-status、canon-show、canon-approve、canon-finalize。長文修正指示は canon-reject --reason 短文 --instructions Markdownパス。
+
+## 挿絵付きHTML公開
+
+確定本文から、計画・Visual Bible・Antigravity画像生成・オフラインHTML公開を再開可能なセッションとして実行できます。
+
+```powershell
+py -3 -m kobo.cli visual-start 1 --work prototype-001
+py -3 -m kobo.cli visual-resume --work prototype-001 --session SESSION_ID
+py -3 -m kobo.cli visual-approve --work prototype-001 --session SESSION_ID
+py -3 -m kobo.cli visual-finalize --work prototype-001 --session SESSION_ID
+```
+
+画像は`agy --print`からAntigravityの画像生成機能を呼び出し、生成物の実体・形式・寸法を検証してからHTMLへ取り込みます。公開物は`novels/{work}/illustrated-html-vNNN/`に保存され、外部CDNやJavaScriptに依存しません。

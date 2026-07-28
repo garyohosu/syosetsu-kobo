@@ -2058,3 +2058,8 @@ TBD-004〜TBD-006とTBD-010は未解決のままである。本文確定後の�
 - 承認前の確定成果物作成、同一セッションの二重確定、既存版の上書きを拒否する。差戻しは旧成果物を残したまま修正版を別revisionへ保存する。
 - `canon-updater`と`canon-auditor`はいずれもGemini契約であり、`--dummy`時だけ実Geminiではない決定論的出力を使う。監査軸は人物、関係、知識、時系列、資源、能力、伏線、世界ルールである。
 - 確定後は5成果物のパスを含むメールを`scene-planner`へ送り、作品の`next_agent`を更新する。実Geminiの資格・応答は環境依存で未検証である。
+# 挿絵付きHTML公開（instruction-17）
+
+確定済みの章本文は、`kobo.visual_publish.VisualPublisher`の計画・生成・承認・確定セッションで、本文を改変せず挿絵付きオフラインHTMLへ公開する。計画は本文間隔、表紙、最大8枚の本文画像、共通Visual Bibleを記録する。画像生成はAntigravityの`agy --print`へ委譲し、PNG等の実体検証に失敗した生成物は採用しない。
+
+`.kobo/works/{work}/visual/{session_id}`を作業領域とし、確定版は`novels/{work}/illustrated-html-vNNN/`へ非上書きで保存する。HTML生成時はHTMLエスケープと本文正規化比較を行い、ソース本文の完全収録を検証する。

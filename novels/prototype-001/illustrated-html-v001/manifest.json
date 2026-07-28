@@ -1,0 +1,52 @@
+{
+  "source_sha256": "9a5783094f4555dc19627cf1ca1b4c0d6074697affad4f58f0f90b8f77db7b9d",
+  "characters": 8153,
+  "image_count": 9,
+  "images": [
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-cover",
+      "path": "cover.png",
+      "paragraph": -1
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-001",
+      "path": "illustration-001.png",
+      "paragraph": 0
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-002",
+      "path": "illustration-002.png",
+      "paragraph": 4
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-003",
+      "path": "illustration-003.png",
+      "paragraph": 6
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-004",
+      "path": "illustration-004.png",
+      "paragraph": 17
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-005",
+      "path": "illustration-005.png",
+      "paragraph": 28
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-006",
+      "path": "illustration-006.png",
+      "paragraph": 53
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-007",
+      "path": "illustration-007.png",
+      "paragraph": 77
+    },
+    {
+      "image_id": "visual-50222c79a6344bb5878f9da67fa611c0-008",
+      "path": "illustration-008.png",
+      "paragraph": 108
+    }
+  ]
+}

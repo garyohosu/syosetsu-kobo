@@ -13,6 +13,8 @@ from .concept import ConceptManager
 from .story_design import StoryDesignManager
 from .manuscript import ManuscriptManager
 from .canon import CanonManager
+from .visual_publish import VisualPublisher
+from .agy_image import AgyImageError
 from .devloop import DevLoop, DevLoopConfig
 
 
@@ -59,6 +61,11 @@ def parser() -> argparse.ArgumentParser:
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
     canon_show=sub.add_parser("canon-show"); canon_show.add_argument("kind",choices=("canon","character_ledger","timeline","resource_ledger","foreshadowing_ledger","audit","draft","revision")); canon_show.add_argument("--work"); canon_show.add_argument("--session")
     canon_reject=sub.add_parser("canon-reject"); canon_reject.add_argument("--reason",required=True); canon_reject.add_argument("--instructions",type=Path); canon_reject.add_argument("--work"); canon_reject.add_argument("--session")
+    visual_start=sub.add_parser("visual-start"); visual_start.add_argument("chapter",type=int); visual_start.add_argument("--work",required=True)
+    for name in ("visual-resume","visual-status","visual-approve","visual-finalize"):
+        command=sub.add_parser(name); command.add_argument("--work",required=True); command.add_argument("--session")
+    visual_show=sub.add_parser("visual-show"); visual_show.add_argument("kind",choices=("plan","html")); visual_show.add_argument("--work",required=True); visual_show.add_argument("--session")
+    visual_regenerate=sub.add_parser("visual-regenerate"); visual_regenerate.add_argument("image_id"); visual_regenerate.add_argument("--work",required=True); visual_regenerate.add_argument("--session")
     dev_status=sub.add_parser("devloop-status"); dev_status.add_argument("--dev-config",type=Path,default=Path("devloop.json"))
     dev_once=sub.add_parser("devloop-once"); dev_once.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_once.add_argument("--execute",action="store_true"); dev_once.add_argument("--publish",action="store_true")
     dev_run=sub.add_parser("devloop-run"); dev_run.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_run.add_argument("--execute",action="store_true"); dev_run.add_argument("--publish",action="store_true"); dev_run.add_argument("--max-cycles",type=int)
@@ -137,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command=="manuscript-show": result=manager.show(args.kind,args.work,args.session)
             elif args.command=="manuscript-approve": result=manager.approve(args.work,args.session)
             else: result=manager.finalize(args.work,args.session)
+        elif args.command.startswith("visual-"):
+            manager=VisualPublisher(orchestrator,dummy=args.dummy)
+            if args.command=="visual-start": result=manager.start(args.chapter,args.work)
+            elif args.command=="visual-resume": result=manager.resume(args.work,args.session)
+            elif args.command=="visual-status": result=manager.status(args.work,args.session)
+            elif args.command=="visual-show": result=manager.show(args.kind,args.work,args.session)
+            elif args.command=="visual-regenerate": result=manager.regenerate(args.image_id,args.work,args.session)
+            elif args.command=="visual-approve": result=manager.approve(args.work,args.session)
+            else: result=manager.finalize(args.work,args.session)
         elif args.command.startswith("canon-"):
             manager=CanonManager(orchestrator,dummy=args.dummy)
             if args.command=="canon-start": result=manager.start(args.chapter,args.work)
@@ -185,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "urs-preview": result = manager.preview(args.work,args.session)
             elif args.command == "urs-finalize": result = manager.finalize(args.work,args.session)
             else: result = interactive_urs(manager,args.work,args.session)
-    except (KoboError, GeminiError, AgyError, OSError, ValueError, json.JSONDecodeError) as error:
+    except (KoboError, GeminiError, AgyError, AgyImageError, OSError, ValueError, json.JSONDecodeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False)); return 1
     print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2)); return 0
 

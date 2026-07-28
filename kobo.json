@@ -9,6 +9,17 @@
     "agy": ["agy"]
   },
   "models": {},
+  "visual_publish": {
+    "enabled": true,
+    "target_chars_per_image": 1200,
+    "min_chars_between_images": 700,
+    "max_chars_without_image": 1800,
+    "min_body_images": 3,
+    "max_body_images": 8,
+    "cover_enabled": true,
+    "aspect_ratio": "4:3",
+    "image_format": "png"
+  },
   "default_timeout": 300,
   "max_attempts": 3,
   "max_hops": 10,

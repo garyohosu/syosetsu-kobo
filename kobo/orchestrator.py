@@ -9,7 +9,7 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -142,6 +142,7 @@ class Config:
     max_hops: int = 10
     escalation_agent: str = "manager"
     first_agent: str | None = None
+    visual_publish: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None, environ: dict[str, str] | None = None) -> "Config":
@@ -155,7 +156,7 @@ class Config:
         commands = data.get("commands", {"dummy": ["dummy"], "gemini": ["gemini", "--model", "{model}", "--input", "{task_path}", "--output", "{output_path}"]})
         if not isinstance(commands, dict) or any(not isinstance(v, list) or not all(isinstance(x, str) for x in v) for v in commands.values()):
             raise KoboError("commandsは文字列配列の辞書でなければなりません")
-        return cls(root=base, store=resolved("store", ".kobo"), state_db=resolved("state_db", ".kobo/state.db"), mail_db=resolved("mail_db", ".kobo/mail.db"), agents_dir=resolved("agents_dir", "agents"), commands=commands, models=data.get("models", {}), default_timeout=float(data.get("default_timeout", 300)), max_attempts=int(data.get("max_attempts", 3)), max_hops=int(data.get("max_hops", 10)), escalation_agent=str(data.get("escalation_agent", "manager")), first_agent=data.get("first_agent"))
+        return cls(root=base, store=resolved("store", ".kobo"), state_db=resolved("state_db", ".kobo/state.db"), mail_db=resolved("mail_db", ".kobo/mail.db"), agents_dir=resolved("agents_dir", "agents"), commands=commands, models=data.get("models", {}), default_timeout=float(data.get("default_timeout", 300)), max_attempts=int(data.get("max_attempts", 3)), max_hops=int(data.get("max_hops", 10)), escalation_agent=str(data.get("escalation_agent", "manager")), first_agent=data.get("first_agent"), visual_publish=data.get("visual_publish", {}))
 
 
 class Adapter:

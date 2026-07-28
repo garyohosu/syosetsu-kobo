@@ -18,6 +18,13 @@ def resolve_command(command:list[str])->list[str]:
     return [resolved,*command[1:]]
 
 def default_runner(command,**kwargs):
+    """外部コマンドを実行する。出力の復号は必ずUTF-8で行う。
+
+    text=Trueだけを指定するとPythonはロケール既定エンコーディングで復号する。日本語Windowsではcp932になり、
+    git diffやAI CLIが出力する日本語（UTF-8）を復号できずreader threadがUnicodeDecodeErrorで落ちる。
+    その場合returncodeは0のまま、stdoutだけが空文字列として返るため、差分やテスト結果が無言で失われる。
+    encoding/errorsを明示して復号を固定し、未知のバイトは例外にせず置換する。呼び出し側の明示指定は尊重する。"""
+    kwargs.setdefault("encoding","utf-8"); kwargs.setdefault("errors","replace")
     return subprocess.run(resolve_command(command),**kwargs)
 
 @dataclass(frozen=True)

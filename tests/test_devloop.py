@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,7 +64,35 @@ class ResolveCommandTest(unittest.TestCase):
             result=default_runner(["codex","exec","task.md"],cwd="/repo",text=True,capture_output=True,timeout=1800,shell=False,check=False,input="hello",env={"A":"1"})
         self.assertIs(result.__class__,Result)
         self.assertEqual(captured["command"],["/usr/local/bin/codex","exec","task.md"])
-        self.assertEqual(captured["kwargs"],{"cwd":"/repo","text":True,"capture_output":True,"timeout":1800,"shell":False,"check":False,"input":"hello","env":{"A":"1"}})
+        self.assertEqual(captured["kwargs"],{"cwd":"/repo","text":True,"capture_output":True,"timeout":1800,"shell":False,"check":False,"input":"hello","env":{"A":"1"},"encoding":"utf-8","errors":"replace"})
+    def test_default_runner_forces_utf8_decoding(self):
+        """ロケール既定（日本語Windowsではcp932）に任せず、UTF-8で復号させる。"""
+        class Result:
+            returncode=0; stdout="ok"; stderr=""
+        captured={}
+        def fake_run(command,**kwargs):
+            captured.update(kwargs); return Result()
+        with patch("kobo.devloop.shutil.which",return_value="/usr/bin/git"), patch("kobo.devloop.subprocess.run",side_effect=fake_run):
+            default_runner(["git","diff","--binary"],text=True,capture_output=True)
+        self.assertEqual(captured["encoding"],"utf-8"); self.assertEqual(captured["errors"],"replace")
+    def test_default_runner_respects_explicit_encoding(self):
+        class Result:
+            returncode=0; stdout="ok"; stderr=""
+        captured={}
+        def fake_run(command,**kwargs):
+            captured.update(kwargs); return Result()
+        with patch("kobo.devloop.shutil.which",return_value="/usr/bin/git"), patch("kobo.devloop.subprocess.run",side_effect=fake_run):
+            default_runner(["git","status"],encoding="latin-1",errors="strict")
+        self.assertEqual(captured["encoding"],"latin-1"); self.assertEqual(captured["errors"],"strict")
+    def test_japanese_utf8_output_survives_real_subprocess(self):
+        """実プロセス経由でも日本語UTF-8出力が失われないことを確認する回帰テスト。
+
+        修正前は日本語Windowsでreader threadがUnicodeDecodeErrorで落ち、returncode=0のまま
+        stdoutが空になり、git diffの内容が無言で消えていた。"""
+        text="正史・台帳を更新する。差分が空になってはいけない。"
+        done=default_runner([sys.executable,"-c","import sys;sys.stdout.write(sys.argv[1])",text],
+                            text=True,capture_output=True,timeout=60,shell=False,check=False)
+        self.assertEqual(done.returncode,0); self.assertEqual(done.stdout,text)
 
 class RetryReuseTest(unittest.TestCase):
     def setUp(self):

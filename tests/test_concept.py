@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kobo.concept import EVALUATION_AXES, REQUIRED_CANDIDATE_HEADINGS, ConceptManager
+from kobo.concept import EVALUATION_AXES, POSITION_MARKERS, REQUIRED_CANDIDATE_HEADINGS, ConceptManager
 from kobo.orchestrator import Config, KoboError, Orchestrator
 from kobo.urs import UrsManager
 from tests.test_orchestrator import definition
@@ -103,8 +103,16 @@ class ConceptManagerTest(unittest.TestCase):
         self.assertEqual(manager.action("reject_all",work_id=work)["status"],"rejected")
 
     def test_regeneration_preserves_old_candidates(self):
-        old_paths=[c["path"] for c in self.manager.candidates(self.work_id)]; regenerated=self.manager.action("regenerate",work_id=self.work_id)
-        self.assertNotEqual(regenerated["session_id"],self.result["session_id"]); self.assertTrue(all(Path(p).is_file() for p in old_paths)); self.assertEqual(regenerated["generated"],5)
+        old={c["path"]:Path(c["path"]).read_text(encoding="utf-8") for c in self.manager.candidates(self.work_id)}
+        regenerated=self.manager.action("regenerate",work_id=self.work_id)
+        self.assertNotEqual(regenerated["session_id"],self.result["session_id"]); self.assertEqual(regenerated["generated"],5)
+        for path,text in old.items():
+            self.assertTrue(Path(path).is_file()); self.assertEqual(Path(path).read_text(encoding="utf-8"),text)
+        new_paths={c["path"] for c in self.manager.candidates(self.work_id,regenerated["session_id"])}
+        self.assertTrue(new_paths.isdisjoint(old))
+        with self.orch.connection() as db:
+            rows={r[0]:r[1] for r in db.execute("SELECT session_id,status FROM concept_sessions WHERE work_id=?",(self.work_id,))}
+        self.assertEqual(rows[self.result["session_id"]],"superseded"); self.assertEqual(rows[regenerated["session_id"]],"awaiting_selection")
 
     def test_revision_uses_file_and_history_is_append_only(self):
         instructions=self.root/"revision.md"; instructions.write_text("中心関係を強める。"*1000,encoding="utf-8")
@@ -144,13 +152,21 @@ class ConceptManagerTest(unittest.TestCase):
             self.assertLessEqual(len(logline),80)
             self.assertTrue(500<=len(synopsis)<=800)
 
-    def test_protagonist_has_gender_age_and_desire(self):
+    def test_protagonist_has_gender_age_position_and_desire(self):
         for candidate in self.manager.candidates(self.work_id):
             text=Path(candidate["path"]).read_text(encoding="utf-8")
             protagonist=text.split("## 主人公\n\n",1)[1].split("\n\n## ",1)[0].strip()
             self.assertRegex(protagonist,r"\d+歳|\d+代")
             self.assertTrue(any(token in protagonist for token in ("男性","女性")))
+            self.assertTrue(any(token in protagonist for token in POSITION_MARKERS),f"立場がありません: {protagonist}")
             self.assertTrue(any(token in protagonist for token in ("望","願")))
+
+    def test_protagonist_without_position_is_rejected(self):
+        base=Path(self.manager.candidates(self.work_id)[0]["path"]).read_text(encoding="utf-8")
+        head,_,tail=base.partition("## 主人公\n\n")
+        _,_,rest=tail.partition("\n\n## ")
+        no_position=head+"## 主人公\n\n32歳女性。祖母の家を整理している最中で、過去に区切りをつけたいと願っている。\n\n## "+rest
+        with self.assertRaisesRegex(KoboError,"立場"): self.manager._validate_candidate(no_position)
 
     def test_reader_profile_section_present(self):
         for candidate in self.manager.candidates(self.work_id):

@@ -123,8 +123,8 @@ def load_agents(directory: Path) -> dict[str, AgentDefinition]:
     for agent in agents.values():
         if agent.next_agent and agent.next_agent not in agents:
             raise KoboError(f"未定義のnext_agentです: {agent.agent_id} -> {agent.next_agent}")
-        if agent.is_prose_writer and agent.adapter != "gemini":
-            raise KoboError(f"文章作成工程はGeminiアダプター必須です: {agent.agent_id}")
+        if agent.is_prose_writer and agent.adapter not in {"gemini", "agy"}:
+            raise KoboError(f"文章作成工程のアダプターが不正です: {agent.agent_id}")
     return agents
 
 
@@ -280,6 +280,9 @@ class Orchestrator:
     def _adapter(self, agent: AgentDefinition) -> Adapter:
         if agent.adapter in self.adapters:
             return self.adapters[agent.adapter]
+        if agent.adapter == "agy":
+            from .agy import AgyAdapter
+            return AgyAdapter(self.config.commands.get("agy", ["agy"])[0])
         template = self.config.commands.get(agent.adapter)
         if not template:
             raise KoboError(f"アダプターが登録されていません: {agent.adapter}")

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .orchestrator import Config, DummyAdapter, KoboError, Orchestrator, load_agents
 from .gemini import GeminiAdapter, GeminiError
+from .agy import AgyAdapter, AgyError
 from .urs import UrsManager
 from .concept import ConceptManager
 from .story_design import StoryDesignManager
@@ -28,6 +29,8 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("stop")
     sub.add_parser("gemini-doctor")
     smoke = sub.add_parser("gemini-smoke"); smoke.add_argument("--model")
+    sub.add_parser("agy-doctor")
+    agy_smoke = sub.add_parser("agy-smoke"); agy_smoke.add_argument("--model")
     start = sub.add_parser("urs-start"); start.add_argument("--work"); start.add_argument("--known-json", type=Path)
     for name in ("urs-question", "urs-status", "urs-preview", "urs-finalize", "urs-interactive"):
         command = sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
@@ -65,6 +68,11 @@ def parser() -> argparse.ArgumentParser:
 def gemini_adapter(config: Config) -> GeminiAdapter:
     template = config.commands.get("gemini", ["gemini"])
     return GeminiAdapter(template[0], template[1:])
+
+
+def agy_adapter(config: Config) -> AgyAdapter:
+    template = config.commands.get("agy", ["agy"])
+    return AgyAdapter(template[0])
 
 
 def interactive_urs(manager: UrsManager, work: str | None, session: str | None) -> dict:
@@ -107,6 +115,14 @@ def main(argv: list[str] | None = None) -> int:
             task = run_dir / "task.md"; output = run_dir / "result.md"
             task.write_text("# 接続確認\n\nこれは機密情報や小説本文を含まない接続テストです。日本語で「接続確認成功」とだけ回答してください。\n", encoding="utf-8")
             refs = {"task_path":str(task),"output_path":str(output),"model":args.model or config.models.get("gemini",agent.model),"run_id":run_id,"run_dir":str(run_dir),"agent_path":str(agent.path),"mail_db":str(config.mail_db),"mail_id":"diagnostic"}
+            result = adapter.smoke(agent, refs, output)
+        elif args.command == "agy-doctor":
+            result = agy_adapter(config).doctor(config.default_timeout)
+        elif args.command == "agy-smoke":
+            adapter = agy_adapter(config); agent = orchestrator.agents["writer"]
+            run_id = orchestrator._new_run_id(); run_dir = config.store / "diagnostics" / run_id; run_dir.mkdir(parents=True)
+            output = run_dir / "result.md"
+            refs = {"model": args.model or "", "run_id": run_id, "run_dir": str(run_dir), "mail_id": "diagnostic"}
             result = adapter.smoke(agent, refs, output)
         elif args.command.startswith("devloop-"):
             loop=DevLoop(DevLoopConfig.load(args.dev_config))
@@ -169,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "urs-preview": result = manager.preview(args.work,args.session)
             elif args.command == "urs-finalize": result = manager.finalize(args.work,args.session)
             else: result = interactive_urs(manager,args.work,args.session)
-    except (KoboError, GeminiError, OSError, ValueError, json.JSONDecodeError) as error:
+    except (KoboError, GeminiError, AgyError, OSError, ValueError, json.JSONDecodeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False)); return 1
     print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2)); return 0
 

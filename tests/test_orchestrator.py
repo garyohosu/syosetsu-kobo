@@ -59,9 +59,9 @@ class OrchestratorTest(unittest.TestCase):
         (self.agents / "bad.md").write_text(definition("Bad ID", timeout=0), encoding="utf-8")
         with self.assertRaises(KoboError): load_agents(self.agents)
 
-    def test_non_gemini_prose_writer_is_rejected(self):
-        (self.agents / "writer.md").write_text(definition("writer", "dummy", "critic", ["prose-writing"]), encoding="utf-8")
-        with self.assertRaisesRegex(KoboError, "Gemini"): load_agents(self.agents)
+    def test_unknown_prose_adapter_is_rejected(self):
+        (self.agents / "writer.md").write_text(definition("writer", "unknown", "critic", ["prose-writing"]), encoding="utf-8")
+        with self.assertRaisesRegex(KoboError, "アダプター"): load_agents(self.agents)
 
     def test_create_and_active_work(self):
         work = self.orch.create_work("story-one", "Story")

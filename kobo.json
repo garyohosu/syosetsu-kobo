@@ -6,9 +6,9 @@
   "first_agent": "planner",
   "commands": {
     "dummy": ["dummy"],
-    "gemini": ["gemini", "--approval-mode", "plan"]
+    "agy": ["agy"]
   },
-  "models": {"gemini": "gemini-2.5-pro"},
+  "models": {},
   "default_timeout": 300,
   "max_attempts": 3,
   "max_hops": 10,

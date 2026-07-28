@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,45 @@ from kobo.concept import EVALUATION_AXES, REQUIRED_CANDIDATE_HEADINGS, ConceptMa
 from kobo.orchestrator import Config, KoboError, Orchestrator
 from kobo.urs import UrsManager
 from tests.test_orchestrator import definition
+
+OLD_FORMAT_CANDIDATE = """# 企画候補 C01: 旧仕様の候補
+
+- 候補ID: `C01`
+- 参照URS: `dummy.md`（v001）
+- 生成アダプター: `dummy`
+
+## 一文で言うと
+
+旧フォーマットの一文コンセプト。
+
+## 主人公
+
+24歳女性。旧フォーマットの主人公欄。
+
+## 物語の始まり
+
+旧フォーマットの始まり。
+
+## 中心となる人物関係
+
+旧フォーマットの人物関係。
+
+## 第一話のあらすじ
+
+""" + ("旧フォーマットのあらすじ。" * 40) + """
+
+## この先を読みたくなる疑問
+
+旧フォーマットの疑問。
+
+## 連載した場合の楽しみ
+
+旧フォーマットの楽しみ。
+
+## 主なリスク
+
+旧フォーマットのリスク。
+"""
 
 
 class ConceptManagerTest(unittest.TestCase):
@@ -87,7 +127,51 @@ class ConceptManagerTest(unittest.TestCase):
         text=Path(board["path"]).read_text(encoding="utf-8")
         self.assertEqual(board["candidate_count"],5)
         self.assertEqual(text.count('<article class="card">'),5)
+        self.assertEqual(text.count("## 第一話のあらすじ"),5)
+        self.assertEqual(text.count("面白そう度: 1 2 3 4 5"),5)
+        self.assertEqual(text.count("続きを読みたい"),5)
+        self.assertEqual(text.count("判定: 選ぶ / 修正候補 / 保留 / 却下"),5)
         self.assertNotIn("<img",text.lower()); self.assertNotIn("<script",text.lower()); self.assertNotIn("http://",text); self.assertNotIn("https://",text)
+
+    def test_nine_required_headings(self):
+        self.assertEqual(len(REQUIRED_CANDIDATE_HEADINGS),9)
+
+    def test_logline_and_synopsis_length_bounds(self):
+        for candidate in self.manager.candidates(self.work_id):
+            text=Path(candidate["path"]).read_text(encoding="utf-8")
+            logline=text.split("## ログライン\n\n",1)[1].split("\n\n## ",1)[0].strip()
+            synopsis=text.split("## 第一話のあらすじ\n\n",1)[1].split("\n\n## ",1)[0].strip()
+            self.assertLessEqual(len(logline),80)
+            self.assertTrue(500<=len(synopsis)<=800)
+
+    def test_protagonist_has_gender_age_and_desire(self):
+        for candidate in self.manager.candidates(self.work_id):
+            text=Path(candidate["path"]).read_text(encoding="utf-8")
+            protagonist=text.split("## 主人公\n\n",1)[1].split("\n\n## ",1)[0].strip()
+            self.assertRegex(protagonist,r"\d+歳|\d+代")
+            self.assertTrue(any(token in protagonist for token in ("男性","女性")))
+            self.assertTrue(any(token in protagonist for token in ("望","願")))
+
+    def test_reader_profile_section_present(self):
+        for candidate in self.manager.candidates(self.work_id):
+            text=Path(candidate["path"]).read_text(encoding="utf-8")
+            reader=text.split("## 想定読者と読後感\n\n",1)[1].split("\n\n## ",1)[0].strip()
+            self.assertTrue(reader)
+
+    def test_central_characters_limited_to_three(self):
+        for candidate in self.manager.candidates(self.work_id):
+            text=Path(candidate["path"]).read_text(encoding="utf-8")
+            central=text.split("## 中心人物\n\n",1)[1].split("\n\n## ",1)[0].strip()
+            people=[line for line in central.splitlines() if line.startswith("- ")]
+            self.assertTrue(1<=len(people)<=3)
+        base=Path(self.manager.candidates(self.work_id)[0]["path"]).read_text(encoding="utf-8")
+        head,_,tail=base.partition("## 中心人物\n\n")
+        _,_,rest=tail.partition("\n\n## ")
+        four_people=head+"## 中心人物\n\n- 一人目: 説明。\n- 二人目: 説明。\n- 三人目: 説明。\n- 四人目: 説明。\n\n## "+rest
+        with self.assertRaisesRegex(KoboError,"3人以内"): self.manager._validate_candidate(four_people)
+
+    def test_old_format_candidate_is_rejected_as_new_generation(self):
+        with self.assertRaisesRegex(KoboError,"必須項目"): self.manager._validate_candidate(OLD_FORMAT_CANDIDATE)
 
     def test_mail_lineage_tracks_handoff_start_compare_and_final(self):
         self.manager.action("select","C01",work_id=self.work_id); final=self.manager.finalize(self.work_id)

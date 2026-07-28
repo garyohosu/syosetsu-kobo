@@ -94,7 +94,7 @@ py -3 -m kobo.cli --config kobo.json --dummy urs-finalize --work my-story
 
 ## 複数企画候補の生成・比較・選択
 
-確定済み`URS.vNNN.md`または読者プロファイルから既定5案を作り、生成担当とは別の`concept-reviewer`が比較します。候補数はCLIで1〜5に変更できます。候補は編集会議用の短い8項目ラフで、`concept-board`が画像なし・通信なしのカードHTMLを作ります。利用者が選択・確定するまでストーリー設計、本文、挿絵へ進みません。
+確定済み`URS.vNNN.md`または読者プロファイルから既定5案を作り、生成担当とは別の`concept-reviewer`が比較します。候補数はCLIで1〜5に変更できます。候補はプロ作家・新人賞下読み・編集者取材知見に基づく編集会議用の9項目ラフ（ログライン、一行コンセプト、想定読者と読後感、主人公、中心人物、物語の始まり、第一話のあらすじ、連載の推進力、この企画の弱点）で、`concept-board`が画像なし・通信なしのカードHTMLを作ります。カード先頭に仮題・ログライン・一行コンセプト・主人公・想定読者と読後感を要約表示し、末尾に面白そう度・続きを読みたいか・気になる人物・弱点・判定の評価欄を置きます。利用者が選択・確定するまでストーリー設計、本文、挿絵へ進みません。
 
 ```powershell
 py -3 -m kobo.cli --config kobo.json --dummy concept-start --work my-story --count 3
@@ -110,7 +110,7 @@ py -3 -m kobo.cli --config kobo.json --dummy concept-finalize --work my-story
 
 選択以外に`concept-hold`、`concept-reject-all`、`concept-regenerate`があります。長い修正指示はargvへ載せず、`concept-revise C02 --instructions revision.md`でUTF-8 MarkdownまたはJSONのパスを渡します。`concept-history`は選択・修正履歴、`concept-resume`は中断後の未完了地点を返します。
 
-実行時はplannerの創作生成だけをGeminiへルーティングします。`--dummy`成果物にはダミーであることを明記します。比較は独立成果物としてURS適合性、禁止条件、独自性、先読み欲求、主人公の能動性、持続性、中盤停滞、模倣、矛盾リスクについて根拠・長所・弱点・改善案を残します。AI推奨だけでは確定せず、利用者の明示選択後に限り非上書きの`CONCEPT.vNNN.md`を作ります。
+実行時はplannerの創作生成だけをGeminiへルーティングします。`--dummy`成果物にはダミーであることを明記します。比較は独立成果物としてログライン明瞭度、主人公の願望と能動性、主人公への共感または関心、中心人物関係の強さ、第一話の満足、意外な転換の有効性、先読み欲求、想定読者と読後感の明瞭さ、説明過多リスク、連載の推進力について根拠・長所・弱点・改善案を残します。AI推奨だけでは確定せず、利用者の明示選択後に限り非上書きの`CONCEPT.vNNN.md`を作ります。
 
 ## ストーリーバイブルと全体プロット
 

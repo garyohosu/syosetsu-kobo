@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import sqlite3
 import uuid
@@ -12,7 +13,21 @@ from .orchestrator import KoboError, atomic_write, now, safe_path
 REQUIRED_CANDIDATE_HEADINGS = ("ログライン", "一行コンセプト", "想定読者と読後感", "主人公", "中心人物", "物語の始まり", "第一話のあらすじ", "連載の推進力", "この企画の弱点")
 # 主人公欄の「立場」検出に使う語。職業・身分を示す語尾と代表的な役割名を並べる。
 # 「家」「主」のような単独では誤検出しやすい字は入れない（例:「祖母の家を整理」）。
-POSITION_MARKERS = ("員", "士", "官", "師", "職人", "秘書", "兵", "事務", "学生", "店主", "跡取り", "令嬢", "令息", "見習い", "記者", "探偵", "商人", "騎士", "王子", "王女", "教師", "社長", "部長", "課長", "主婦", "医者", "看護", "弁護")
+POSITION_MARKERS = ("員", "士", "官", "師", "職人", "秘書", "兵", "事務", "学生", "店主", "跡取り", "令嬢", "令息", "見習い", "記者", "探偵", "商人", "騎士", "王子", "王女", "教師", "社長", "部長", "課長", "主婦", "医者", "看護", "弁護",
+                    # 「人」で終わる職業。単独の「人」は「二人」「他人」に誤反応するため複合語だけを列挙する。
+                    "案内人", "整理人", "管理人", "料理人", "使用人", "番人", "世話人", "代書人", "支配人")
+# 候補番号ごとの創作方向。独立呼出しで5案が似ることを防ぐ（instruction-20 §7.2）。
+CANDIDATE_DIRECTIONS = (
+    "恋愛またはラブコメ。人物同士の距離と誤解を主軸にする。",
+    "不思議な日常。日常へ異常を一つだけ持ち込み、その結果として人物関係が変わる。",
+    "秘密、約束、過去の選択。感情的な謎を主軸にする。",
+    "冒険または危機。危機の中の選択によって人物関係が変わる。",
+    "猫が中心的な役割を持つ。案内役や飾りではなく、物語の核に関わらせる。",
+)
+DUMMY_PROVENANCE = "テスト用ダミー。企画選定禁止"
+REAL_PROVENANCE = "実Antigravity"
+# ダミーセッションで拒否する操作（instruction-20 §5）。
+DUMMY_FORBIDDEN_ACTIONS = ("select", "revise")
 EVALUATION_AXES = ("ログライン明瞭度", "主人公の願望と能動性", "主人公への共感または関心", "中心人物関係の強さ", "第一話の満足", "意外な転換の有効性", "先読み欲求", "想定読者と読後感の明瞭さ", "説明過多リスク", "連載の推進力")
 ACTIONS = {"select", "hold", "reject_all", "regenerate", "revise"}
 
@@ -21,14 +36,33 @@ def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex}"
 
 
+def _strip_code_fence(text: str) -> str:
+    """AIが全体を```markdownで包んで返した場合だけ外側の柵を外す。"""
+    lines = text.strip().splitlines()
+    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text.strip()
+
+
 def _sections(text: str) -> dict:
-    result = {}
-    for heading in REQUIRED_CANDIDATE_HEADINGS:
-        marker = f"## {heading}\n\n"
-        if marker not in text: continue
-        part = text.split(marker, 1)[1]
-        result[heading] = part.split("\n\n## ", 1)[0].strip()
-    return result
+    """`## 見出し`単位に分解する。見出し後の空行有無に依存しない。"""
+    result, current, buffer = {}, None, []
+    for line in text.splitlines():
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            if current: result[current] = "\n".join(buffer).strip()
+            current, buffer = match.group(1).strip(), []
+        elif current is not None:
+            buffer.append(line)
+    if current: result[current] = "\n".join(buffer).strip()
+    return {key: value for key, value in result.items() if key in REQUIRED_CANDIDATE_HEADINGS}
+
+
+def _document_title(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].split(":", 1)[-1].strip()
+    raise KoboError("企画候補の見出し行（# 企画候補 CNN: 仮題）がありません")
 
 
 class ConceptManager:
@@ -84,7 +118,7 @@ class ConceptManager:
         urs,path=self._latest_urs(work["work_id"]); timestamp=now(); session_id=new_id("concept")
         mail_id=self._handoff_mail(work["work_id"],path)
         with self.orchestrator.connection() as db:
-            try: db.execute("INSERT INTO concept_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(session_id,work["work_id"],urs["id"],str(path),urs["version"],count,"generating","dummy" if self.dummy else "gemini",mail_id,None,None,timestamp,timestamp,None))
+            try: db.execute("INSERT INTO concept_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(session_id,work["work_id"],urs["id"],str(path),urs["version"],count,"generating","dummy" if self.dummy else "agy",mail_id,None,None,timestamp,timestamp,None))
             except sqlite3.IntegrityError as error: raise KoboError("この作品には進行中の企画セッションがあります") from error
         if mail_id:
             planning_mail_id=self.orchestrator.mail.send("planner","concept-reviewer",f"企画開始 work_id={work['work_id']} session_id={session_id} urs_path={path}",parent_message_id=mail_id)
@@ -94,7 +128,38 @@ class ConceptManager:
     def _candidate_path(self,session,ordinal):
         return self.orchestrator.config.store/"works"/session["work_id"]/"concepts"/session["session_id"]/f"candidate-c{ordinal:02d}.md"
 
-    def _dummy_candidate(self,session,ordinal):
+    def _relative(self,path)->str:
+        """成果物へ絶対パスを残さない（instruction-20 §10）。"""
+        try: return Path(path).resolve().relative_to(self.orchestrator.config.root.resolve()).as_posix()
+        except ValueError: return Path(path).name
+
+    def _model(self,agent_id="planner")->str:
+        agent=self.orchestrator.agents[agent_id]
+        return self.orchestrator.config.models.get(agent_id,self.orchestrator.config.models.get(agent.adapter,agent.model))
+
+    def _model_label(self,agent_id="planner")->str:
+        """`configured-by-settings`は設定の既定値であり、実際には--modelを渡していない。"""
+        value=self._model(agent_id)
+        return "Antigravity既定（--model未指定）" if value in ("configured-by-settings","default","") else value
+
+    def _is_dummy_session(self,session)->bool:
+        return session["adapter"]=="dummy"
+
+    def _provenance_lines(self,session,ordinal,run_id)->str:
+        dummy=self._is_dummy_session(session)
+        kind=DUMMY_PROVENANCE if dummy else REAL_PROVENANCE
+        lines=[f"- 候補ID: `C{ordinal:02d}`",f"- 生成種別: {kind}",f"- アダプター: `{session['adapter']}`"]
+        if not dummy: lines.append(f"- モデル: `{self._model_label('planner')}`")
+        lines.append(f"- セッションID: `{session['session_id']}`")
+        lines.append(f"- 生成実行ID: `{run_id}`")
+        lines.append(f"- 参照読者プロファイル: `{self._relative(session['urs_path'])}`（v{session['urs_version']:03d}、固定）")
+        return "\n".join(lines)
+
+    def _assemble_candidate(self,session,ordinal,run_id,title,sections)->str:
+        body="\n\n".join(f"## {heading}\n\n{sections[heading]}" for heading in REQUIRED_CANDIDATE_HEADINGS)
+        return f"# 企画候補 C{ordinal:02d}: {title}\n\n{self._provenance_lines(session,ordinal,run_id)}\n\n{body}\n"
+
+    def _dummy_candidate(self,session,ordinal,run_id):
         data=[
         ("幼馴染と嘘の婚約",
          "見合いから逃げたい令嬢が、幼馴染の秘書に偽装婚約を頼み、隠していた本音との距離を測る話。",
@@ -149,12 +214,12 @@ class ConceptManager:
         ]
         title,logline,concept,reader,protagonist,central,opening,synopsis,drive,weakness=data[ordinal-1]
         values={"ログライン":logline,"一行コンセプト":concept,"想定読者と読後感":reader,"主人公":protagonist,"中心人物":central,"物語の始まり":opening,"第一話のあらすじ":synopsis,"連載の推進力":drive,"この企画の弱点":weakness}
-        return f"# 企画候補 C{ordinal:02d}: {title}\n\n- 候補ID: `C{ordinal:02d}`\n- 参照URS: `{session['urs_path']}`（v{session['urs_version']:03d}）\n- 生成アダプター: `dummy`（実Gemini生成物ではない）\n\n"+"\n\n".join(f"## {h}\n\n{values[h]}" for h in REQUIRED_CANDIDATE_HEADINGS)+"\n"
+        return self._assemble_candidate(session,ordinal,run_id,title,values)
 
     def _validate_candidate(self,text: str):
-        missing=[h for h in REQUIRED_CANDIDATE_HEADINGS if f"## {h}" not in text]
-        if missing: raise KoboError(f"企画候補の必須項目が不足しています: {missing}")
         sections=_sections(text)
+        missing=[h for h in REQUIRED_CANDIDATE_HEADINGS if h not in sections]
+        if missing: raise KoboError(f"企画候補の必須項目が不足しています: {missing}")
         logline=sections["ログライン"]
         if len(logline) > 80: raise KoboError(f"ログラインは80字以内です（{len(logline)}字）")
         synopsis=sections["第一話のあらすじ"]
@@ -163,7 +228,10 @@ class ConceptManager:
         if not protagonist: raise KoboError("主人公欄が空です")
         if not re.search(r"\d+歳|\d+代",protagonist): raise KoboError("主人公欄に年齢層の記載がありません")
         if not any(token in protagonist for token in ("男性","女性")): raise KoboError("主人公欄に性別の記載がありません")
-        if not any(token in protagonist for token in POSITION_MARKERS): raise KoboError("主人公欄に立場（職業・身分）の記載がありません")
+        # 「立場:」と明示されていればそれを正とし、無い場合だけ職業語尾で推定する。
+        labelled=re.search(r"立場\s*[:：]\s*(\S.*)",protagonist)
+        if not labelled and not any(token in protagonist for token in POSITION_MARKERS):
+            raise KoboError("主人公欄に立場（職業・身分）の記載がありません。「立場: 〇〇」の形式で職業または身分を書いてください")
         if not any(token in protagonist for token in ("望","願")): raise KoboError("主人公欄に願望の記載がありません")
         if not sections["想定読者と読後感"]: raise KoboError("想定読者と読後感が空です")
         central=sections["中心人物"]
@@ -171,28 +239,200 @@ class ConceptManager:
         if not people: raise KoboError("中心人物が記載されていません")
         if len(people) > 3: raise KoboError(f"中心人物は3人以内です（{len(people)}人）")
 
+    def _existing_summaries(self,session)->list[str]:
+        """既に検証合格した候補の要約。C02以降の差別化に使う（instruction-20 §7.3）。"""
+        summaries=[]
+        with self.orchestrator.connection() as db:
+            rows=[dict(r) for r in db.execute("SELECT ordinal,path FROM concept_candidates WHERE session_id=? ORDER BY ordinal",(session["session_id"],))]
+        for row in rows:
+            parsed=_sections(Path(row["path"]).read_text(encoding="utf-8"))
+            summaries.append(f"- C{row['ordinal']:02d} ログライン: {parsed.get('ログライン','')}\n  一行コンセプト: {parsed.get('一行コンセプト','')}\n  中心人物: {' / '.join(line.lstrip('- ').strip() for line in parsed.get('中心人物','').splitlines() if line.strip().startswith('- '))}")
+        return summaries
+
+    def _candidate_prompt(self,session,ordinal,profile,existing,feedback=None)->str:
+        parts=[f"あなたは日本語web小説の企画編集者です。候補C{ordinal:02d}の企画ラフを1件だけ作成してください。",
+               "",
+               "## 絶対条件",
+               "- 小説の本文は書かない。企画ラフだけを書く。",
+               "- 出力はMarkdown本体のみ。前置き、後書き、コードフェンス、説明文を付けない。",
+               f"- 1行目は `# 企画候補 C{ordinal:02d}: 仮題` の形式にする。",
+               f"- 見出しは次の9個を、この順で過不足なく `## 見出し` として書く: {' / '.join(REQUIRED_CANDIDATE_HEADINGS)}",
+               "",
+               "## 各見出しの要件",
+               "- ログライン: 誰が何を望み、何に妨げられ、何をするかを一文で。**80字以内厳守**。",
+               "- 一行コンセプト: 帯の文句のように、読者にとって何がおいしいかを一文で。ログラインの言い換えにしない。",
+               "- 想定読者と読後感: 年代や嗜好と、読後に残したい感情を書く。",
+               "- 主人公: 次の6項目を必ず `- 項目: 内容` の箇条書きで書く。性別（男性/女性の語を含める）、年齢（「28歳」の形式）、立場（職業・身分を名詞で明記）、願望（「望む」「願う」の語を含める）、弱点、行動原理。最後に `- セリフ:` として個性の伝わる短いセリフを一つ。",
+               "- 中心人物: 主人公を含め**3人以内**。必ず `- 名前(役割): 説明` の箇条書きで書く。4人以上は不可。",
+               "- 物語の始まり: 最初の場面で起きる異常、衝突、出会いまたは選択。世界設定の説明から始めない。",
+               "- 第一話のあらすじ: 結末まで含めて**500字以上800字以内厳守**。主人公の願望、妨げる人物や状況、主人公自身の選択と行動、中盤の予想外の転換、感情が最も動く場面、第一話としての決着、次話への未解決の問いを含める。",
+               "- 連載の推進力: 人物関係、願望、秘密、成長、環境変化のどれが次話以降を動かすか。150字以内。",
+               "- この企画の弱点: 既視感、説明過多、主人公の受動性、中盤停滞などを具体的に。",
+               "",
+               "## 今回の候補の方向",
+               f"C{ordinal:02d}は次の方向で作ること: {CANDIDATE_DIRECTIONS[ordinal-1]}",
+               "",
+               "## 禁止事項",
+               "- 店、工房、修理、設備、制度改善、職業知識の披露を娯楽の中心に置くこと。",
+               "- 主人公が正解を説明し、周囲が感心するだけの展開。",
+               "- 事件に巻き込まれ、最後まで他人の指示に従うだけの主人公。",
+               "- 第一話を未解決の謎だけで終わらせること。小さくても決着を置く。",
+               "",
+               "## 読者プロファイル（この読者に向けて作る）",
+               profile]
+        if existing:
+            parts += ["","## 同じセッションで既に採用済みの候補（重複禁止）","\n".join(existing),"",
+                      "上記と、主人公の願望、中心人物関係、ジャンル、感情的な読書体験、第一話の転換、連載の推進力のすべてで明確に異なる案にすること。題名や舞台だけを変えた同じ構造の案は不可。"]
+        if feedback:
+            parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
+        return "\n".join(parts)
+
+    def _run_agent(self,agent_id,prompt,output_path,run_id,session):
+        agent=self.orchestrator.agents[agent_id]
+        refs={"prompt":prompt,"output_path":str(output_path),"model":self._model(agent_id),"run_id":run_id,
+              "run_dir":str(output_path.parent),"agent_path":str(agent.path),"mail_db":str(self.orchestrator.config.mail_db),
+              "mail_id":str(session["source_mail_id"] or "none")}
+        self.orchestrator._adapter(agent).execute(agent,refs,output_path)
+        return output_path.read_text(encoding="utf-8")
+
     def _generate_one(self,session,ordinal):
         path=self._candidate_path(session,ordinal); run_id=self.orchestrator._new_run_id(); candidate_id=f"{session['session_id']}-c{ordinal:02d}"
         if path.exists(): raise KoboError("既存企画候補の上書きを拒否しました")
-        if self.dummy: text=self._dummy_candidate(session,ordinal)
+        if self.dummy:
+            text=self._dummy_candidate(session,ordinal,run_id); self._validate_candidate(text); attempts=1
         else:
-            task=path.parent/f"task-c{ordinal:02d}.md"; urs=Path(session["urs_path"]).read_text(encoding="utf-8")
-            atomic_write(task,f"# 企画候補生成\n\n候補ID C{ordinal:02d}。本文を書かず、次の確定URSから他候補と明確に異なる企画を作ること。必須見出し: {', '.join(REQUIRED_CANDIDATE_HEADINGS)}\n\n## 確定URS\n\n{urs}")
-            agent=self.orchestrator.agents["planner"]; refs={"task_path":str(task),"output_path":str(path),"model":self.orchestrator.config.models.get("planner",self.orchestrator.config.models.get("gemini",agent.model)),"run_id":run_id,"run_dir":str(path.parent),"agent_path":str(agent.path),"mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
-            self.orchestrator._adapter(agent).execute(agent,refs,path); text=path.read_text(encoding="utf-8")
-        self._validate_candidate(text); atomic_write(path,text); timestamp=now(); title=text.splitlines()[0].split(":",1)[-1].strip()
-        with self.orchestrator.connection() as db: db.execute("INSERT INTO concept_candidates VALUES(?,?,?,?,?,?,?,?)",(candidate_id,session["session_id"],ordinal,title,str(path),run_id,"generated",timestamp))
+            text,attempts=self._generate_with_retry(session,ordinal,run_id,path)
+        atomic_write(path,text); timestamp=now(); title=_document_title(text)
+        with self.orchestrator.connection() as db: db.execute("INSERT INTO concept_candidates VALUES(?,?,?,?,?,?,?,?)",(candidate_id,session["session_id"],ordinal,title,str(path),run_id,f"generated:attempt={attempts}",timestamp))
+
+    def _generate_with_retry(self,session,ordinal,run_id,path):
+        """実AI出力は一時ファイルへ受け、検証合格したものだけを正式候補にする（instruction-20 §7.4）。"""
+        agent=self.orchestrator.agents["planner"]; limit=max(1,min(agent.max_attempts,3))
+        profile=Path(session["urs_path"]).read_text(encoding="utf-8").strip()
+        existing=self._existing_summaries(session); attempts_dir=path.parent/"attempts"; attempts_dir.mkdir(parents=True,exist_ok=True)
+        feedback=None; failures=[]
+        for attempt in range(1,limit+1):
+            raw_path=attempts_dir/f"c{ordinal:02d}-attempt-{attempt}.md"
+            prompt=self._candidate_prompt(session,ordinal,profile,existing,feedback)
+            try:
+                raw=self._run_agent("planner",prompt,raw_path,run_id,session)
+                text=self._normalize_candidate(session,ordinal,run_id,raw)
+                self._validate_candidate(text)
+                return text,attempt
+            except KoboError as error:
+                feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                atomic_write(attempts_dir/f"c{ordinal:02d}-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"C{ordinal:02d}の実AI生成が{limit}回とも書式検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    def _normalize_candidate(self,session,ordinal,run_id,raw):
+        text=_strip_code_fence(raw); parsed=_sections(text)
+        missing=[heading for heading in REQUIRED_CANDIDATE_HEADINGS if heading not in parsed]
+        if missing: raise KoboError(f"企画候補の必須項目が不足しています: {missing}")
+        return self._assemble_candidate(session,ordinal,run_id,_document_title(text),parsed)
+
+    def _dummy_evaluation(self,session,candidate,run_id)->str:
+        body=(f"# 企画評価 {candidate['candidate_id']}\n\n- 生成種別: {DUMMY_PROVENANCE}\n- 評価担当: `concept-reviewer`\n"
+              f"- 評価実行ID: `{run_id}`\n- 候補生成実行ID: `{candidate['generation_run_id']}`\n\n")
+        for axis in EVALUATION_AXES:
+            body+=f"## {axis}\n\n根拠: 候補成果物と読者プロファイルを独立に照合。\n\n長所: 案{candidate['ordinal']}固有の推進力がある。\n\n弱点・リスク: 仮定の検証が必要。\n\n改善案: 企画確定前に未決事項を明示する。\n\n5段階評価: 3\n\n"
+            if axis=="先読み欲求": body+="判定方針: 最後に謎を置いただけの引きより、人物関係・願望・秘密が途中から自然に動いて次を読みたくなる構造を高く評価する。\n\n"
+        return body+"## 総評\n\nダミー評価のため採否判断には使えない。最終選択は利用者が行う。\n"
+
+    def _evaluation_prompt(self,candidate,profile)->str:
+        return "\n".join([
+            "あなたは企画の比較・監査担当です。次の企画候補を読者プロファイルへ独立に照合し、評価だけを書いてください。",
+            "",
+            "## 絶対条件",
+            "- 候補本文を書き換えない。作品本文も書かない。",
+            "- 出力はMarkdown本体のみ。前置き、コードフェンスを付けない。",
+            f"- 次の10軸を、この順で過不足なく `## 軸名` として書く: {' / '.join(EVALUATION_AXES)}",
+            "- 各軸に「根拠:」「長所:」「弱点:」「改善案:」「5段階評価:」の5行を必ず含める。",
+            "- 「根拠:」には候補中の具体的な記述を引用または要約して示す。一般論だけで書かない。",
+            "- 「5段階評価:」は 1〜5 の整数のみを書く。",
+            "- 最後に `## 総評` を置き、この候補の採用可否ではなく、強みと不安を3文以内でまとめる。",
+            "- 先読み欲求は、最後に謎を置いただけの引きより、途中から人物関係・願望・秘密が自然に動いて次を知りたくなる構造を高く評価する。",
+            "",
+            "## 読者プロファイル",
+            profile,
+            "",
+            "## 評価対象の企画候補",
+            candidate["content"] if "content" in candidate else Path(candidate["path"]).read_text(encoding="utf-8"),
+        ])
+
+    def _validate_evaluation(self,text: str):
+        found={m.group(1).strip() for m in re.finditer(r"^##\s+(.+?)\s*$",text,re.MULTILINE)}
+        missing=[axis for axis in EVALUATION_AXES if axis not in found]
+        if missing: raise KoboError(f"評価の必須軸が不足しています: {missing}")
+        if len(re.findall(r"5段階評価\s*[:：]\s*([1-5])",text)) < len(EVALUATION_AXES):
+            raise KoboError("各軸に「5段階評価: 1〜5」を書いてください")
+        for label in ("根拠","長所","弱点","改善案"):
+            if len(re.findall(rf"^{label}\s*[:：]",text,re.MULTILINE)) < len(EVALUATION_AXES):
+                raise KoboError(f"各軸に「{label}:」を書いてください")
+
+    def _evaluation_score(self,text: str)->int:
+        return sum(int(value) for value in re.findall(r"5段階評価\s*[:：]\s*([1-5])",text))
 
     def _evaluate_one(self,session,candidate):
         path=Path(candidate["path"]).with_name(f"evaluation-c{candidate['ordinal']:02d}.md"); run_id=self.orchestrator._new_run_id()
         if path.exists(): raise KoboError("既存評価の上書きを拒否しました")
-        body=f"# 企画評価 {candidate['candidate_id']}\n\n- 評価担当: `concept-reviewer`\n- 評価実行ID: `{run_id}`\n- 候補生成実行ID: `{candidate['generation_run_id']}`\n\n"
-        for axis in EVALUATION_AXES:
-            body+=f"## {axis}\n\n根拠: 候補成果物と確定URSを独立に照合。\n\n長所: 案{candidate['ordinal']}固有の推進力がある。\n\n弱点・リスク: 仮定の検証が必要。\n\n改善案: 企画確定前に未決事項を明示する。\n\n"
-            if axis=="先読み欲求": body+="判定方針: 最後に謎を置いただけの引きより、人物関係・願望・秘密が途中から自然に動いて次を読みたくなる構造を高く評価する。\n\n"
-        body+=f"## AI推奨\n\n暫定順位: {candidate['ordinal']}。数値だけで採否を決めず、最終選択は利用者が行う。\n"
-        atomic_write(path,body); timestamp=now()
-        with self.orchestrator.connection() as db: db.execute("INSERT INTO concept_evaluations(session_id,candidate_id,path,evaluation_run_id,evaluator_id,recommendation_rank,created_at) VALUES(?,?,?,?,?,?,?)",(session["session_id"],candidate["candidate_id"],str(path),run_id,"concept-reviewer",candidate["ordinal"],timestamp))
+        if self.dummy:
+            body=self._dummy_evaluation(session,candidate,run_id); atomic_write(path,body)
+        else:
+            body=self._evaluate_with_retry(session,candidate,run_id,path)
+        timestamp=now()
+        with self.orchestrator.connection() as db: db.execute("INSERT INTO concept_evaluations(session_id,candidate_id,path,evaluation_run_id,evaluator_id,recommendation_rank,created_at) VALUES(?,?,?,?,?,?,?)",(session["session_id"],candidate["candidate_id"],str(path),run_id,"concept-reviewer",None,timestamp))
+
+    def _evaluate_with_retry(self,session,candidate,run_id,path)->str:
+        agent=self.orchestrator.agents["concept-reviewer"]; limit=max(1,min(agent.max_attempts,3))
+        profile=Path(session["urs_path"]).read_text(encoding="utf-8").strip()
+        attempts_dir=path.parent/"attempts"; attempts_dir.mkdir(parents=True,exist_ok=True); failures=[]
+        prompt=self._evaluation_prompt(candidate,profile)
+        for attempt in range(1,limit+1):
+            raw_path=attempts_dir/f"eval-c{candidate['ordinal']:02d}-attempt-{attempt}.md"
+            try:
+                raw=self._run_agent("concept-reviewer",prompt,raw_path,run_id,session)
+                text=_strip_code_fence(raw); self._validate_evaluation(text)
+                header=(f"# 企画評価 {candidate['candidate_id']}\n\n- 生成種別: {REAL_PROVENANCE}\n- 評価担当: `concept-reviewer`\n"
+                        f"- アダプター: `{session['adapter']}`\n- モデル: `{self._model_label('concept-reviewer')}`\n"
+                        f"- 評価実行ID: `{run_id}`\n- 候補生成実行ID: `{candidate['generation_run_id']}`\n\n")
+                atomic_write(path,header+text+"\n"); return header+text+"\n"
+            except KoboError as error:
+                failures.append(f"attempt {attempt}: {error}"); prompt=self._evaluation_prompt(candidate,profile)+f"\n\n## 前回出力の書式エラー（必ず直す）\n{error}"
+                atomic_write(attempts_dir/f"eval-c{candidate['ordinal']:02d}-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"C{candidate['ordinal']:02d}の実AI評価が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    def _comparison_path(self,session)->Path:
+        return self.orchestrator.config.store/"works"/session["work_id"]/"concepts"/session["session_id"]/"comparison.md"
+
+    def _build_comparison(self,session):
+        """全候補を同時に比較する総括を1回だけ作る（instruction-20 §8）。"""
+        path=self._comparison_path(session)
+        if path.exists(): return
+        with self.orchestrator.connection() as db:
+            rows=[dict(r) for r in db.execute("SELECT e.path AS evaluation_path,c.ordinal,c.title,c.candidate_id,c.path FROM concept_evaluations e JOIN concept_candidates c ON c.candidate_id=e.candidate_id WHERE e.session_id=? ORDER BY c.ordinal",(session["session_id"],))]
+        scores={row["candidate_id"]:self._evaluation_score(Path(row["evaluation_path"]).read_text(encoding="utf-8")) for row in rows}
+        run_id=self.orchestrator._new_run_id()
+        if self.dummy:
+            body=f"# 企画比較総括\n\n- 生成種別: {DUMMY_PROVENANCE}\n- 比較実行ID: `{run_id}`\n\n"
+            body+="\n".join(f"- C{row['ordinal']:02d} {row['title']}: 合計{scores[row['candidate_id']]}点" for row in rows)
+            body+="\n\n順位は補助情報であり、自動選択には使わない。最終選択は利用者が行う。\n"
+        else:
+            digest="\n\n".join(f"### C{row['ordinal']:02d} {row['title']}\n\n"+_sections(Path(row['path']).read_text(encoding='utf-8')).get('ログライン','') for row in rows)
+            prompt="\n".join(["あなたは企画の比較・監査担当です。次の5候補を同時に比較し、比較総括を1回だけ書いてください。","",
+                              "## 絶対条件","- 出力はMarkdown本体のみ。前置き、コードフェンスを付けない。",
+                              "- `## 各案の違い` に、候補ごとの読書体験の差を1行ずつ書く。",
+                              "- `## 補助順位` に、根拠付きの順位を書く。候補番号をそのまま順位にしない。",
+                              "- `## 利用者へ確認したい点` に、AIでは決められない判断を3点以内で書く。",
+                              "- 順位は補助情報であり自動選択には使わないと明記する。","",
+                              "## 候補一覧",digest])
+            raw=self._run_agent("concept-reviewer",prompt,self._comparison_path(session).with_name("comparison.raw.md"),run_id,session)
+            header=f"# 企画比較総括\n\n- 生成種別: {REAL_PROVENANCE}\n- アダプター: `{session['adapter']}`\n- モデル: `{self._model_label('concept-reviewer')}`\n- 比較実行ID: `{run_id}`\n\n"
+            body=header+_strip_code_fence(raw)+"\n"
+        atomic_write(path,body)
+        order=sorted(rows,key=lambda row:(-scores[row["candidate_id"]],row["ordinal"]))
+        with self.orchestrator.connection() as db:
+            for rank,row in enumerate(order,1):
+                db.execute("UPDATE concept_evaluations SET recommendation_rank=? WHERE session_id=? AND candidate_id=?",(rank,session["session_id"],row["candidate_id"]))
 
     def resume(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id)
@@ -206,6 +446,7 @@ class ConceptManager:
                 candidates=[dict(r) for r in db.execute("SELECT * FROM concept_candidates WHERE session_id=? ORDER BY ordinal",(session["session_id"],))]; evaluated={r[0] for r in db.execute("SELECT candidate_id FROM concept_evaluations WHERE session_id=?",(session["session_id"],))}
             for candidate in candidates:
                 if candidate["candidate_id"] not in evaluated: self._evaluate_one(session,candidate)
+            self._build_comparison(session)
             with self.orchestrator.connection() as db: db.execute("UPDATE concept_sessions SET status='awaiting_selection',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
             if session["planning_mail_id"]:
                 comparison_mail_id=self.orchestrator.mail.send("concept-reviewer","planner",f"企画比較完了 session_id={session['session_id']} 状態=選択待ち",parent_message_id=session["planning_mail_id"])
@@ -249,7 +490,9 @@ class ConceptManager:
         for row in rows:
             content=Path(row["path"]).read_text(encoding="utf-8")
             sections=_sections(content)
+            badge=DUMMY_PROVENANCE if self._is_dummy_session(session) else f"{REAL_PROVENANCE}生成"
             summary=(f'<div class="summary">'
+                     f'<p class="origin">{html.escape(badge)}</p>'
                      f'<p><strong>ログライン:</strong> {html.escape(sections.get("ログライン",""))}</p>'
                      f'<p><strong>一行コンセプト:</strong> {html.escape(sections.get("一行コンセプト",""))}</p>'
                      f'<p><strong>主人公:</strong> {html.escape(sections.get("主人公",""))}</p>'
@@ -266,14 +509,59 @@ class ConceptManager:
         path=self.orchestrator.config.store/"works"/session["work_id"]/"concepts"/session["session_id"]/"editorial-board"/"index.html"
         path.parent.mkdir(parents=True,exist_ok=True)
         body="".join(cards)
-        page=f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>編集会議 - 企画比較</title><style>body{{margin:0;background:#f5f1ea;color:#28231f;font-family:system-ui,"Yu Gothic",sans-serif}}main{{max-width:1100px;margin:auto;padding:1rem}}.board{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}}.card{{background:#fff;border:1px solid #d8cec2;border-radius:12px;padding:1rem;box-shadow:0 2px 8px #0001}}pre{{white-space:pre-wrap;font:inherit;line-height:1.7;margin:0}}h1{{font-size:1.5rem}}h2{{font-size:1.1rem;border-bottom:2px solid #c96;padding-bottom:.4rem}}.summary{{background:#fbf6ee;border:1px solid #e6dccb;border-radius:8px;padding:.6rem .8rem;margin:.6rem 0;font-size:.92rem;line-height:1.6}}.summary p{{margin:.2rem 0}}.judge{{border-top:1px dashed #c9bda8;margin-top:.8rem;padding-top:.6rem;font-size:.92rem;line-height:1.8}}.judge p{{margin:.2rem 0}}</style></head><body><main><h1>編集会議用 企画比較</h1><p>候補を比較し、人間が面白そう・惜しい・保留・全却下を判断する。AI推奨だけでは制作へ進まない。</p><section class="board">{body}</section></main></body></html>'''
+        dummy=self._is_dummy_session(session)
+        notice=(f'<p class="notice">{html.escape(DUMMY_PROVENANCE)}：この一覧はテスト用fixtureです。企画選定には使えません。</p>' if dummy
+                else f'<p class="notice">{html.escape(REAL_PROVENANCE)}生成（アダプター: {html.escape(session["adapter"])} / モデル: {html.escape(self._model_label("planner"))}）</p>')
+        comparison=self._comparison_path(session)
+        summary_section=(f'<section class="comparison"><h2>AI比較総括（参考）</h2><p>順位は補助情報です。第一印象は上のカードで判断してください。</p><pre>{html.escape(comparison.read_text(encoding="utf-8"))}</pre></section>' if comparison.is_file() else "")
+        page=f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>編集会議 - 企画比較</title><style>body{{margin:0;background:#f5f1ea;color:#28231f;font-family:system-ui,"Yu Gothic",sans-serif}}main{{max-width:1100px;margin:auto;padding:1rem}}.board{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}}.card{{background:#fff;border:1px solid #d8cec2;border-radius:12px;padding:1rem;box-shadow:0 2px 8px #0001}}pre{{white-space:pre-wrap;font:inherit;line-height:1.7;margin:0}}h1{{font-size:1.5rem}}h2{{font-size:1.1rem;border-bottom:2px solid #c96;padding-bottom:.4rem}}.summary{{background:#fbf6ee;border:1px solid #e6dccb;border-radius:8px;padding:.6rem .8rem;margin:.6rem 0;font-size:.92rem;line-height:1.6}}.summary p{{margin:.2rem 0}}.judge{{border-top:1px dashed #c9bda8;margin-top:.8rem;padding-top:.6rem;font-size:.92rem;line-height:1.8}}.judge p{{margin:.2rem 0}}.origin{{display:inline-block;background:#efe3cf;border:1px solid #d3bf9d;border-radius:999px;padding:.1rem .6rem;font-size:.8rem;margin:0 0 .4rem}}.notice{{background:#fff;border-left:4px solid #c96;padding:.6rem .8rem;border-radius:4px}}.comparison{{margin-top:1.5rem;background:#fff;border:1px solid #d8cec2;border-radius:12px;padding:1rem}}.comparison pre{{white-space:pre-wrap;font:inherit;line-height:1.7}}</style></head><body><main><h1>編集会議用 企画比較</h1>{notice}<p>候補を比較し、人間が面白そう・惜しい・保留・全却下を判断する。AI推奨だけでは制作へ進まない。</p><section class="board">{body}</section>{summary_section}</main></body></html>'''
         atomic_write(path,page)
         return {"path":str(path),"session_id":session["session_id"],"candidate_count":len(rows),"status":session["status"]}
+
+    def _reject_dummy(self,session,operation):
+        if self._is_dummy_session(session):
+            raise KoboError(f"ダミーセッションでは{operation}できません。ダミー候補はテスト専用のfixtureです。実AI生成セッション（adapter=agy）を作成してください（concept-regenerate）")
+
+    def publish(self,work_id=None,session_id=None):
+        """編集会議成果物をGit追跡下へ出版する。企画の確定ではない（instruction-20 §10）。"""
+        session=self._session(work_id,session_id)
+        self._reject_dummy(session,"Git追跡下へ出版")
+        board=self.board(session["work_id"],session["session_id"])
+        with self.orchestrator.connection() as db:
+            candidates=[dict(r) for r in db.execute("SELECT * FROM concept_candidates WHERE session_id=? ORDER BY ordinal",(session["session_id"],))]
+            evaluations=[dict(r) for r in db.execute("SELECT e.*,c.ordinal FROM concept_evaluations e JOIN concept_candidates c ON c.candidate_id=e.candidate_id WHERE e.session_id=? ORDER BY c.ordinal",(session["session_id"],))]
+        if not candidates: raise KoboError("出版できる候補がありません")
+        base=self.orchestrator.config.root/"novels"/session["work_id"]
+        version=1
+        while (base/f"editorial-board-v{version:03d}").exists(): version+=1
+        target=base/f"editorial-board-v{version:03d}"; target.mkdir(parents=True)
+        atomic_write(target/"index.html",Path(board["path"]).read_text(encoding="utf-8"))
+        for candidate in candidates:
+            atomic_write(target/f"candidate-c{candidate['ordinal']:02d}.md",Path(candidate["path"]).read_text(encoding="utf-8"))
+        for evaluation in evaluations:
+            atomic_write(target/f"evaluation-c{evaluation['ordinal']:02d}.md",Path(evaluation["path"]).read_text(encoding="utf-8"))
+        comparison=self._comparison_path(session)
+        if comparison.is_file(): atomic_write(target/"comparison.md",comparison.read_text(encoding="utf-8"))
+        provenance={"session_id":session["session_id"],"work_id":session["work_id"],"adapter":session["adapter"],
+                    "model":self._model_label("planner"),"evaluator_model":self._model_label("concept-reviewer"),"dummy":False,
+                    "generated_at":now(),"status":session["status"],
+                    "reader_profile":self._relative(session["urs_path"]),"reader_profile_version":session["urs_version"],
+                    "candidate_run_ids":{f"C{c['ordinal']:02d}":c["generation_run_id"] for c in candidates},
+                    "evaluation_run_ids":{f"C{e['ordinal']:02d}":e["evaluation_run_id"] for e in evaluations},
+                    "source_paths":{"board":self._relative(board["path"]),
+                                    "candidates":[self._relative(c["path"]) for c in candidates],
+                                    "evaluations":[self._relative(e["path"]) for e in evaluations],
+                                    "comparison":self._relative(comparison) if comparison.is_file() else None},
+                    "note":"この出版は企画の確定ではない。利用者の明示選択が必要。"}
+        atomic_write(target/"PROVENANCE.json",json.dumps(provenance,ensure_ascii=False,indent=2)+"\n")
+        return {"path":self._relative(target),"version":version,"session_id":session["session_id"],
+                "candidate_count":len(candidates),"evaluation_count":len(evaluations),"status":session["status"]}
 
     def action(self,action,candidate_id=None,*,instruction_path=None,note=None,work_id=None,session_id=None):
         if action not in ACTIONS: raise KoboError("企画操作が不正です")
         session=self._session(work_id,session_id)
         if session["status"] not in ("awaiting_selection","selected","held"): raise KoboError("現在の状態では選択操作できません")
+        if action in DUMMY_FORBIDDEN_ACTIONS: self._reject_dummy(session,f"{action}操作を実行")
         if action in ("select","revise"):
             if not candidate_id: raise KoboError("候補IDが必要です")
             candidate_id=self.candidate(candidate_id,session["work_id"],session["session_id"])["candidate_id"]
@@ -306,10 +594,11 @@ class ConceptManager:
         return f"# 作品企画（CONCEPT）\n\n- 版: {version}\n- 状態: {'確定' if final else 'プレビュー'}\n- work_id: `{session['work_id']}`\n- 参照URS: `{session['urs_path']}`（v{session['urs_version']:03d}、固定）\n- 選択候補: `{candidate['candidate_id']}`\n- 選択根拠: 利用者の明示選択。AI推奨のみでは確定していない。\n\n## 作品ブリーフ\n\n{candidate['title']}を基礎とする。\n\n{candidate['content']}\n\n## 利用者の修正指示\n\n{revision}\n\n## 必須・禁止条件\n\n確定URSの必須・禁止条件を変更しない。\n\n## 仮決定・未決事項・リスク\n\n候補成果物に記載された仮定とリスクを次工程で検証する。\n\n## 次工程入力\n\n参照URSと本CONCEPTのパスを入力とし、未実装の作品設計工程へ引き渡す。本文生成はまだ実行しない。\n"
 
     def preview(self,work_id=None,session_id=None):
-        session=self._session(work_id,session_id); path=self.orchestrator.config.store/"works"/session["work_id"]/"concepts"/"CONCEPT.preview.md"; atomic_write(path,self._render(session,0,False)); return {"path":str(path),"status":"preview"}
+        session=self._session(work_id,session_id); self._reject_dummy(session,"プレビューを生成")
+        path=self.orchestrator.config.store/"works"/session["work_id"]/"concepts"/"CONCEPT.preview.md"; atomic_write(path,self._render(session,0,False)); return {"path":str(path),"status":"preview"}
 
     def finalize(self,work_id=None,session_id=None):
-        session=self._session(work_id,session_id)
+        session=self._session(work_id,session_id); self._reject_dummy(session,"企画を確定")
         if session["status"]=="final": raise KoboError("同じ企画セッションの二重確定を拒否しました")
         action,candidate=self._selected(session)
         with self.orchestrator.connection() as db: version=db.execute("SELECT COALESCE(MAX(d.version),0)+1 FROM concept_documents d JOIN concept_sessions s ON s.session_id=d.session_id WHERE s.work_id=?",(session["work_id"],)).fetchone()[0]

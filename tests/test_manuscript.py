@@ -8,18 +8,19 @@ from kobo.manuscript import AUDIT_AXES, CHAPTER_HEADINGS, SCENE_HEADINGS, Manusc
 from kobo.orchestrator import Config, KoboError, Orchestrator
 from kobo.story_design import StoryDesignManager
 from kobo.urs import UrsManager
+from tests.test_concept import RecordingAgyAdapter
 from tests.test_orchestrator import definition
 
 
 class ManuscriptManagerTest(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name); agents=self.root/"agents"; agents.mkdir()
-        specs=(("urs-maker","dummy","planner",["test"]),("planner","gemini","story-architect",["test"]),("concept-reviewer","dummy","planner",["test"]),("story-architect","gemini","continuity-reviewer",["test"]),("continuity-reviewer","dummy","story-architect",["test"]),("plotter","gemini","plot-reviewer",["test"]),("plot-reviewer","dummy","plotter",["test"]),("scene-planner","gemini","writer",["test"]),("writer","gemini","prose-reviewer",["prose-writing"]),("prose-reviewer","gemini","writer",["prose-review"]),("critic","dummy",None,["review"]))
+        specs=(("urs-maker","dummy","planner",["test"]),("planner","agy","story-architect",["test"]),("concept-reviewer","agy","planner",["test"]),("story-architect","gemini","continuity-reviewer",["test"]),("continuity-reviewer","dummy","story-architect",["test"]),("plotter","gemini","plot-reviewer",["test"]),("plot-reviewer","dummy","plotter",["test"]),("scene-planner","gemini","writer",["test"]),("writer","gemini","prose-reviewer",["prose-writing"]),("prose-reviewer","gemini","writer",["prose-review"]),("critic","dummy",None,["review"]))
         for agent_id,adapter,next_agent,ops in specs:(agents/f"{agent_id}.md").write_text(definition(agent_id,adapter,next_agent,ops),encoding="utf-8")
         config=self.root/"kobo.json"; config.write_text(json.dumps({"store":".state","state_db":".state/state.db","mail_db":".state/mail.db","agents_dir":"agents","first_agent":"urs-maker","commands":{"dummy":["dummy"],"gemini":["gemini"]}}),encoding="utf-8")
-        self.orch=Orchestrator(Config.load(config)); self.work="manuscript-story"; self.orch.create_work(self.work,"架空作品",first_agent="urs-maker")
+        self.orch=Orchestrator(Config.load(config),adapters={"agy":RecordingAgyAdapter()}); self.work="manuscript-story"; self.orch.create_work(self.work,"架空作品",first_agent="urs-maker")
         urs=UrsManager(self.orch); u=urs.start(self.work); urs.answer("work-name","架空作品",work_id=self.work); urs.finalize(self.work,u["session_id"])
-        concept=ConceptManager(self.orch,dummy=True); concept.start(self.work); concept.action("select","C01",work_id=self.work); concept.finalize(self.work)
+        concept=ConceptManager(self.orch,dummy=False); concept.start(self.work); concept.action("select","C01",work_id=self.work); concept.finalize(self.work)
         story=StoryDesignManager(self.orch,dummy=True); s=story.start(self.work); story.approve("bible",self.work,s["session_id"]); story.finalize_bible(self.work,s["session_id"]); story.start_plot(self.work,s["session_id"]); story.approve("plot",self.work,s["session_id"]); story.finalize_plot(self.work,s["session_id"])
         self.manager=ManuscriptManager(self.orch,dummy=True); self.started=self.manager.start(1,"旅立ち",self.work)
 

@@ -108,6 +108,12 @@ py -3 -m kobo.cli --config kobo.json --dummy concept-preview --work my-story
 py -3 -m kobo.cli --config kobo.json --dummy concept-finalize --work my-story
 ```
 
+`--dummy`を付けた企画セッションはテスト用fixtureです。`adapter=dummy`のセッションでは`concept-select`、`concept-revise`、`concept-preview`、`concept-finalize`、`concept-publish`をコードで拒否します。状態確認、一覧、比較、`concept-board`、`concept-hold`、`concept-reject-all`、`concept-regenerate`は許可します。利用者が選ぶ企画は`--dummy`なしの実Antigravity（`adapter=agy`）セッションで生成してください。
+
+実AI生成では、候補番号ごとに創作方向（恋愛／不思議な日常／秘密と約束／冒険／猫）を固定し、C02以降は既に合格した候補のログラインと中心人物をプロンプトへ渡して重複を防ぎます。出力は一旦`attempts/`へ受け、書式検証に合格したものだけを正式候補にします。失敗時は検証エラーを次のプロンプトへ渡して再試行し、上限に達したらダミーへ代替せず`failed`で停止します。
+
+`concept-publish`は編集会議成果物をGit追跡下の`novels/{work}/editorial-board-vNNN/`へ出版します。候補、評価、比較総括、HTML、`PROVENANCE.json`を保存し、絶対パスを残しません。出版は企画の確定ではなく、状態は`awaiting_selection`のままです。
+
 選択以外に`concept-hold`、`concept-reject-all`、`concept-regenerate`があります。長い修正指示はargvへ載せず、`concept-revise C02 --instructions revision.md`でUTF-8 MarkdownまたはJSONのパスを渡します。`concept-history`は選択・修正履歴、`concept-resume`は中断後の未完了地点を返します。
 
 実行時はplannerの創作生成だけをGeminiへルーティングします。`--dummy`成果物にはダミーであることを明記します。比較は独立成果物としてログライン明瞭度、主人公の願望と能動性、主人公への共感または関心、中心人物関係の強さ、第一話の満足、意外な転換の有効性、先読み欲求、想定読者と読後感の明瞭さ、説明過多リスク、連載の推進力について根拠・長所・弱点・改善案を残します。AI推奨だけでは確定せず、利用者の明示選択後に限り非上書きの`CONCEPT.vNNN.md`を作ります。

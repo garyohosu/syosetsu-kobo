@@ -164,3 +164,7 @@ py -3 -m kobo.cli devloop-run --execute --publish --max-cycles 3
 py -3 -m unittest discover -v
 py -3 -m compileall -q kobo mail tests
 ```
+
+## 正史・台帳更新
+
+ダミー検証: py -3 -m kobo.cli --dummy canon-start 1 --work work-id。状態、草案・監査表示、承認、確定は canon-status、canon-show、canon-approve、canon-finalize。長文修正指示は canon-reject --reason 短文 --instructions Markdownパス。

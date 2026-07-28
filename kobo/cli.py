@@ -11,6 +11,7 @@ from .urs import UrsManager
 from .concept import ConceptManager
 from .story_design import StoryDesignManager
 from .manuscript import ManuscriptManager
+from .canon import CanonManager
 from .devloop import DevLoop, DevLoopConfig
 
 
@@ -50,6 +51,11 @@ def parser() -> argparse.ArgumentParser:
     for name in ("manuscript-resume","manuscript-status","manuscript-approve","manuscript-finalize"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
     manuscript_show=sub.add_parser("manuscript-show"); manuscript_show.add_argument("kind",choices=("chapter_design","scene_design","draft","audit","revision","reaudit","final")); manuscript_show.add_argument("--work"); manuscript_show.add_argument("--session")
+    canon_start=sub.add_parser("canon-start"); canon_start.add_argument("chapter",type=int); canon_start.add_argument("--work")
+    for name in ("canon-resume","canon-status","canon-approve","canon-finalize"):
+        command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    canon_show=sub.add_parser("canon-show"); canon_show.add_argument("kind",choices=("canon","character_ledger","timeline","resource_ledger","foreshadowing_ledger","audit","draft","revision")); canon_show.add_argument("--work"); canon_show.add_argument("--session")
+    canon_reject=sub.add_parser("canon-reject"); canon_reject.add_argument("--reason",required=True); canon_reject.add_argument("--instructions",type=Path); canon_reject.add_argument("--work"); canon_reject.add_argument("--session")
     dev_status=sub.add_parser("devloop-status"); dev_status.add_argument("--dev-config",type=Path,default=Path("devloop.json"))
     dev_once=sub.add_parser("devloop-once"); dev_once.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_once.add_argument("--execute",action="store_true"); dev_once.add_argument("--publish",action="store_true")
     dev_run=sub.add_parser("devloop-run"); dev_run.add_argument("--dev-config",type=Path,default=Path("devloop.json")); dev_run.add_argument("--execute",action="store_true"); dev_run.add_argument("--publish",action="store_true"); dev_run.add_argument("--max-cycles",type=int)
@@ -114,6 +120,15 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command=="manuscript-status": result=manager.status(args.work,args.session)
             elif args.command=="manuscript-show": result=manager.show(args.kind,args.work,args.session)
             elif args.command=="manuscript-approve": result=manager.approve(args.work,args.session)
+            else: result=manager.finalize(args.work,args.session)
+        elif args.command.startswith("canon-"):
+            manager=CanonManager(orchestrator,dummy=args.dummy)
+            if args.command=="canon-start": result=manager.start(args.chapter,args.work)
+            elif args.command=="canon-resume": result=manager.resume(args.work,args.session)
+            elif args.command=="canon-status": result=manager.status(args.work,args.session)
+            elif args.command=="canon-show": result=manager.show(args.kind,args.work,args.session)
+            elif args.command=="canon-reject": result=manager.reject(args.reason,args.instructions,args.work,args.session)
+            elif args.command=="canon-approve": result=manager.approve(args.work,args.session)
             else: result=manager.finalize(args.work,args.session)
         elif args.command.startswith("story-"):
             manager=StoryDesignManager(orchestrator,dummy=args.dummy)

@@ -39,6 +39,11 @@ class CanonManager:
                 version INTEGER NOT NULL, chapter_number INTEGER NOT NULL, manuscript_version INTEGER NOT NULL,
                 prior_canon_version INTEGER, path TEXT NOT NULL UNIQUE, source_path TEXT NOT NULL, created_at TEXT NOT NULL,
                 UNIQUE(session_id, kind));
+            CREATE TABLE IF NOT EXISTS canon_publications(
+                publication_id TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE REFERENCES canon_sessions(session_id),
+                work_id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL,
+                staging_path TEXT NOT NULL, final_path TEXT NOT NULL, error TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(work_id, version));
             """)
 
     def _work(self, work_id=None):
@@ -103,13 +108,21 @@ class CanonManager:
         with self.orchestrator.connection() as db:
             return db.execute("SELECT COALESCE(MAX(revision),0)+1 FROM canon_artifacts WHERE session_id=? AND kind='audit'", (session_id,)).fetchone()[0]
 
-    def _mail(self, session, sender, recipient, body):
+    def _mail(self, session, sender, recipient, body, *, event_key=None, parent_id=None):
         if not session["latest_mail_id"]:
             return None
-        mail_id = self.orchestrator.mail.send(sender, recipient, body, parent_message_id=session["latest_mail_id"])
+        mail_id = self.orchestrator.mail.send(sender, recipient, body, parent_message_id=parent_id or session["latest_mail_id"], idempotency_key=event_key)
         with self.orchestrator.connection() as db:
             db.execute("UPDATE canon_sessions SET latest_mail_id=?,updated_at=? WHERE session_id=?", (mail_id,now(),session["session_id"]))
         return mail_id
+
+    def _send_event(self, session, sender, recipient, body, event_key):
+        return self._mail(session, sender, recipient, body, event_key=event_key)
+
+    def _mail_source_id(self, session):
+        with self.orchestrator.mail.connection() as db:
+            row = db.execute("SELECT sender_id,parent_message_id FROM messages WHERE id=?", (session["latest_mail_id"],)).fetchone()
+        return int(row["parent_message_id"]) if row and row["sender_id"] == "manager" and row["parent_message_id"] is not None else session["latest_mail_id"]
 
     def _generate(self, session, revision):
         directory=self._dir(session); directory.mkdir(parents=True,exist_ok=True)
@@ -144,7 +157,11 @@ class CanonManager:
         if session["status"] in ("drafting","revising","failed"):
             revision=self._next_revision(session["session_id"]) if session["status"]=="revising" else 1
             try:
-                self._generate(session,revision); self._audit(session,revision); self._mail(session,"canon-updater","canon-auditor",f"正史・台帳草案生成完了 session_id={session['session_id']} 状態=監査完了")
+                self._generate(session,revision); self._audit(session,revision)
+                session = self._session(work_id, session["session_id"])
+                self._send_event(session,"canon-updater","canon-auditor",f"正史・台帳草案生成完了 session_id={session['session_id']} 状態=監査完了", f"{session['session_id']}:audit:{revision}:updater")
+                session = self._session(work_id, session["session_id"])
+                self._send_event(session,"canon-auditor","manager",f"正史・台帳監査完了 session_id={session['session_id']} chapter={session['chapter_number']} 監査結果パス={self._artifact(session['session_id'], 'audit', revision)['path']} 状態=承認待ち", f"{session['session_id']}:audit:{revision}:manager")
                 with self.orchestrator.connection() as db: db.execute("UPDATE canon_sessions SET status='awaiting_approval',error=NULL,updated_at=? WHERE session_id=?",(now(),session["session_id"]))
             except Exception as error:
                 with self.orchestrator.connection() as db: db.execute("UPDATE canon_sessions SET status='failed',error=?,updated_at=? WHERE session_id=?",(str(error),now(),session["session_id"]))
@@ -165,37 +182,104 @@ class CanonManager:
 
     def approve(self, work_id=None, session_id=None):
         session=self._session(work_id,session_id)
-        if session["status"]!="awaiting_approval": raise KoboError("現在の状態では承認できません")
-        with self.orchestrator.connection() as db: db.execute("INSERT INTO canon_actions(session_id,action,created_at) VALUES(?,?,?)",(session["session_id"],"approve",now())); db.execute("UPDATE canon_sessions SET status='approved',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
-        self._mail(session,"canon-auditor","manager",f"正史・台帳監査完了 session_id={session['session_id']} 状態=承認済み"); return self.status(work_id,session_id)
+        if session["status"] not in ("awaiting_approval", "approved"): raise KoboError("現在の状態では承認できません")
+        if session["status"] == "awaiting_approval":
+            with self.orchestrator.connection() as db: db.execute("INSERT INTO canon_actions(session_id,action,created_at) VALUES(?,?,?)",(session["session_id"],"approve",now())); db.execute("UPDATE canon_sessions SET status='approved',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
+        session = self._session(work_id, session_id)
+        self._send_event(session,"manager","canon-updater",f"正史・台帳承認済み session_id={session['session_id']}", f"{session['session_id']}:approval:{self._mail_source_id(session)}")
+        return self.status(work_id,session_id)
 
     def reject(self, reason, instructions=None, work_id=None, session_id=None):
         session=self._session(work_id,session_id)
-        if session["status"]!="awaiting_approval": raise KoboError("現在の状態では却下できません")
+        if session["status"] not in ("awaiting_approval", "revising"): raise KoboError("現在の状態では却下できません")
         instruction_path=str(safe_path(self.orchestrator.config.root,instructions,must_exist=True)) if instructions is not None else None
-        with self.orchestrator.connection() as db: db.execute("INSERT INTO canon_actions(session_id,action,reason,instruction_path,created_at) VALUES(?,?,?,?,?)",(session["session_id"],"reject",reason,instruction_path,now())); db.execute("UPDATE canon_sessions SET status='revising',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
-        correction = self.orchestrator.mail.send("manager", "canon-updater", "正史・台帳修正指示 session_id=" + session["session_id"] + " reason=" + reason, conversation_id="work-" + session["work_id"])
-        with self.orchestrator.connection() as db: db.execute("UPDATE canon_sessions SET latest_mail_id=?,updated_at=? WHERE session_id=?", (correction, now(), session["session_id"]))
+        if session["status"] == "awaiting_approval":
+            with self.orchestrator.connection() as db: db.execute("INSERT INTO canon_actions(session_id,action,reason,instruction_path,created_at) VALUES(?,?,?,?,?)",(session["session_id"],"reject",reason,instruction_path,now())); db.execute("UPDATE canon_sessions SET status='revising',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
+        else:
+            with self.orchestrator.connection() as db:
+                prior = db.execute("SELECT reason,instruction_path FROM canon_actions WHERE session_id=? AND action='reject' ORDER BY id DESC LIMIT 1", (session["session_id"],)).fetchone()
+            reason = prior["reason"] if prior else reason; instruction_path = prior["instruction_path"] if prior else instruction_path
+        session = self._session(work_id, session_id)
+        body = "正史・台帳修正指示 session_id=" + session["session_id"] + " reason=" + reason
+        if instruction_path: body += " 修正指示ファイル=" + instruction_path
+        body += " 直前の草案・監査を削除せず、新しいrevisionとして修正すること"
+        self._send_event(session, "manager", "canon-updater", body, f"{session['session_id']}:rejection:{self._mail_source_id(session)}")
         return self.status(work_id,session_id)
 
-    def finalize(self, work_id=None, session_id=None):
-        session=self._session(work_id,session_id)
-        if session["status"]!="approved": raise KoboError("利用者承認後にだけ確定できます")
+    def _publication(self, session):
         with self.orchestrator.connection() as db:
-            if db.execute("SELECT 1 FROM canon_documents WHERE session_id=?",(session["session_id"],)).fetchone(): raise KoboError("同じセッションの二重確定を拒否しました")
-            version=db.execute("SELECT COALESCE(MAX(c.version),0)+1 FROM canon_documents c JOIN canon_sessions s ON s.session_id=c.session_id WHERE s.work_id=?",(session["work_id"],)).fetchone()[0]
-        paths=[]
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM canon_publications WHERE session_id=?", (session["session_id"],)).fetchone()
+            if row is None:
+                version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM canon_publications WHERE work_id=?", (session["work_id"],)).fetchone()[0]
+                version = max(version, db.execute("SELECT COALESCE(MAX(c.version),0)+1 FROM canon_documents c JOIN canon_sessions s ON s.session_id=c.session_id WHERE s.work_id=?", (session["work_id"],)).fetchone()[0])
+                publication_id = f"pub-{uuid.uuid4().hex}"
+                base = self.orchestrator.config.store / "works" / session["work_id"] / "canon"
+                staging = base / ".staging" / publication_id; final = base / f"v{version:03d}"
+                timestamp = now()
+                db.execute("INSERT INTO canon_publications VALUES(?,?,?,?,?,?,?,?,?,?)", (publication_id,session["session_id"],session["work_id"],version,"preparing",str(staging),str(final),None,timestamp,timestamp))
+                row = db.execute("SELECT * FROM canon_publications WHERE publication_id=?", (publication_id,)).fetchone()
+            db.commit()
+        return row
+
+    def _publication_text(self, session, kind, version):
+        source = self._artifact(session["session_id"], kind)
+        if not source: raise KoboError("5種の台帳草案が揃っていません")
+        prior = session["prior_canon_path"] or "なし（第1章の空台帳）"
+        header = f"# {LABELS[kind]}\n\n- 版: {version}\n- 状態: 確定\n- work_id: `{session['work_id']}`\n- 章: {session['chapter_number']}\n- 参照本文: `{session['manuscript_path']}`（v{session['manuscript_version']:03d}、固定）\n- 参照バイブル: `{session['bible_path']}`（v{session['bible_version']:03d}、固定）\n- 参照プロット: `{session['plot_path']}`（v{session['plot_version']:03d}、固定）\n- 参照直前台帳: `{prior}`（v{session['prior_canon_version'] or 'なし'}、固定）\n\n"
+        return header + Path(source["path"]).read_text(encoding="utf-8")
+
+    def _validate_publication_dir(self, directory, session, version):
+        expected = {f"{LABELS[k]}.v{version:03d}.md" for k in KINDS}
+        if not directory.is_dir() or {p.name for p in directory.iterdir() if p.is_file()} != expected:
+            raise KoboError(f"公開ディレクトリが不完全です: {directory}")
         for kind in KINDS:
-            source=self._artifact(session["session_id"],kind)
-            if not source: raise KoboError("5種の台帳草案が揃っていません")
-            path=self.orchestrator.config.store/"works"/session["work_id"]/"canon"/f"{LABELS[kind]}.v{version:03d}.md"
-            if path.exists(): raise KoboError("確定成果物の上書きを拒否しました")
-            prior=session["prior_canon_path"] or "なし（第1章の空台帳）"; header=f"# {LABELS[kind]}\n\n- 版: {version}\n- 状態: 確定\n- work_id: `{session['work_id']}`\n- 章: {session['chapter_number']}\n- 参照本文: `{session['manuscript_path']}`（v{session['manuscript_version']:03d}、固定）\n- 参照バイブル: `{session['bible_path']}`（v{session['bible_version']:03d}、固定）\n- 参照プロット: `{session['plot_path']}`（v{session['plot_version']:03d}、固定）\n- 参照直前台帳: `{prior}`（v{session['prior_canon_version'] or 'なし'}、固定）\n\n"; atomic_write(path,header+Path(source["path"]).read_text(encoding="utf-8")); paths.append(str(path))
-        timestamp=now()
-        with self.orchestrator.connection() as db:
-            for kind,path in zip(KINDS,paths): db.execute("INSERT INTO canon_documents(session_id,kind,version,chapter_number,manuscript_version,prior_canon_version,path,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(session["session_id"],kind,version,session["chapter_number"],session["manuscript_version"],session["prior_canon_version"],path,self._artifact(session["session_id"],kind)["path"],timestamp))
-            db.execute("UPDATE canon_sessions SET status='completed',updated_at=? WHERE session_id=?",(timestamp,session["session_id"])); db.execute("UPDATE works SET current_agent='canon-updater',next_agent='scene-planner',status='pending',updated_at=? WHERE work_id=?",(timestamp,session["work_id"]))
-        self._mail(session,"manager","canon-updater","正史・台帳確定通知 work_id=" + session["work_id"] + " chapter=" + str(session["chapter_number"]))
+            path = directory / f"{LABELS[kind]}.v{version:03d}.md"
+            text = path.read_text(encoding="utf-8")
+            if not text.strip() or f"- 版: {version}" not in text or f"work_id: `{session['work_id']}`" not in text:
+                raise KoboError(f"公開成果物のメタデータが不一致です: {path}")
+
+    def _insert_document(self, db, session, publication, kind, path, timestamp):
+        db.execute("INSERT INTO canon_documents(session_id,kind,version,chapter_number,manuscript_version,prior_canon_version,path,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (session["session_id"],kind,publication["version"],session["chapter_number"],session["manuscript_version"],session["prior_canon_version"],str(path),self._artifact(session["session_id"],kind)["path"],timestamp))
+
+    def finalize(self, work_id=None, session_id=None):
         session = self._session(work_id, session_id)
-        handoff=self._mail(session,"canon-updater","scene-planner",f"正史・台帳確定 work_id={session['work_id']} chapter={session['chapter_number']} 次工程=scene-planner plot_path={session['plot_path']} bible_path={session['bible_path']} canon_path={paths[0]} character_ledger_path={paths[1]} timeline_path={paths[2]} resource_ledger_path={paths[3]} foreshadowing_ledger_path={paths[4]}")
-        return {"status":"completed","version":version,"paths":paths,"mail_id":handoff,"next_agent":"scene-planner","next_stage_implemented":True}
+        if session["status"] == "completed":
+            publication = self._publication(session)
+            key = f"{publication['publication_id']}:handoff"
+            if self.orchestrator.mail.message_by_idempotency_key(key): raise KoboError("同じセッションの二重確定を拒否しました")
+            final = Path(publication["final_path"]); self._validate_publication_dir(final, session, publication["version"])
+            paths = [str(final / f"{LABELS[k]}.v{publication['version']:03d}.md") for k in KINDS]
+            handoff = self._send_event(session, "canon-updater", "scene-planner", f"正史・台帳確定 work_id={session['work_id']} chapter={session['chapter_number']} 次工程=scene-planner plot_path={session['plot_path']} bible_path={session['bible_path']} canon_path={paths[0]} character_ledger_path={paths[1]} timeline_path={paths[2]} resource_ledger_path={paths[3]} foreshadowing_ledger_path={paths[4]}", key)
+            return {"status":"completed","version":publication["version"],"paths":paths,"mail_id":handoff,"next_agent":"scene-planner","next_stage_implemented":True}
+        if session["status"] != "approved": raise KoboError("利用者承認後にだけ確定できます")
+        publication = self._publication(session); staging = Path(publication["staging_path"]); final = Path(publication["final_path"])
+        if staging.exists() and final.exists(): raise KoboError("stagingとfinalが同時に存在する不整合です")
+        if not final.exists():
+            if publication["status"] in ("preparing", "prepared"):
+                staging.mkdir(parents=True, exist_ok=True)
+                for kind in KINDS:
+                    atomic_write(staging / f"{LABELS[kind]}.v{publication['version']:03d}.md", self._publication_text(session, kind, publication["version"]))
+                self._validate_publication_dir(staging, session, publication["version"])
+                with self.orchestrator.connection() as db:
+                    db.execute("UPDATE canon_publications SET status='prepared',updated_at=? WHERE publication_id=?", (now(),publication["publication_id"]))
+                final.parent.mkdir(parents=True, exist_ok=True)
+                if final.exists(): raise KoboError("確定版の上書きを拒否しました")
+                staging.rename(final)
+            else: raise KoboError("公開状態と最終ディレクトリが不一致です")
+        self._validate_publication_dir(final, session, publication["version"])
+        timestamp = now()
+        with self.orchestrator.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT COUNT(*) FROM canon_documents WHERE session_id=?", (session["session_id"],)).fetchone()[0]:
+                raise KoboError("同じセッションの二重確定を拒否しました")
+            for kind in KINDS:
+                self._insert_document(db, session, publication, kind, final / f"{LABELS[kind]}.v{publication['version']:03d}.md", timestamp)
+            db.execute("UPDATE canon_publications SET status='completed',updated_at=? WHERE publication_id=?", (timestamp,publication["publication_id"]))
+            db.execute("UPDATE canon_sessions SET status='completed',updated_at=? WHERE session_id=?", (timestamp,session["session_id"]))
+            db.execute("UPDATE works SET current_agent='canon-updater',next_agent='scene-planner',status='pending',updated_at=? WHERE work_id=?", (timestamp,session["work_id"]))
+            db.commit()
+        session = self._session(work_id, session_id)
+        paths = [str(final / f"{LABELS[k]}.v{publication['version']:03d}.md") for k in KINDS]
+        handoff = self._send_event(session, "canon-updater", "scene-planner", f"正史・台帳確定 work_id={session['work_id']} chapter={session['chapter_number']} 次工程=scene-planner plot_path={session['plot_path']} bible_path={session['bible_path']} canon_path={paths[0]} character_ledger_path={paths[1]} timeline_path={paths[2]} resource_ledger_path={paths[3]} foreshadowing_ledger_path={paths[4]}", f"{publication['publication_id']}:handoff")
+        return {"status":"completed","version":publication["version"],"paths":paths,"mail_id":handoff,"next_agent":"scene-planner","next_stage_implemented":True}

@@ -173,6 +173,7 @@ class AgentMail:
                 "escalation_sent": "INTEGER NOT NULL DEFAULT 0",
                 "lease_token": "TEXT",
                 "lease_generation": "INTEGER NOT NULL DEFAULT 0",
+                "idempotency_key": "TEXT",
             }
             for name, definition in additions.items():
                 if name not in columns:
@@ -181,6 +182,7 @@ class AgentMail:
             connection.execute("UPDATE messages SET conversation_id = COALESCE(conversation_id, 'legacy-' || id)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_processing ON messages(recipient_id, processing_status, created_at, id)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_stale ON messages(processing_status, processing_started_at)")
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(idempotency_key) WHERE idempotency_key IS NOT NULL")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
         if not existed:
@@ -209,6 +211,7 @@ class AgentMail:
         self, sender_id: str, recipient_id: str, body: str,
         *, conversation_id: str | None = None, parent_message_id: int | None = None,
         hop_count: int | None = None, thread_id: str | None = None, parent_id: int | None = None,
+        idempotency_key: str | None = None,
     ) -> int:
         self._require_text(body, "body")
         if len(body) > self.max_body_length:
@@ -227,6 +230,13 @@ class AgentMail:
             raise MailError("hop_countは0以上で指定してください")
         with self.connection() as connection:
             connection.execute("BEGIN")
+            if idempotency_key is not None:
+                existing = connection.execute("SELECT id FROM messages WHERE idempotency_key=?", (idempotency_key,)).fetchall()
+                if existing:
+                    if len(existing) > 1:
+                        raise MailError(f"冪等キーに複数メールがあります: {idempotency_key}")
+                    connection.commit()
+                    return int(existing[0]["id"])
             self._ensure_agents_exist(connection, sender_id, recipient_id)
             if parent_message_id is not None:
                 parent = connection.execute("SELECT * FROM messages WHERE id = ?", (parent_message_id,)).fetchone()
@@ -248,12 +258,16 @@ class AgentMail:
                 hop_count = 0
             now = utc_now()
             cursor = connection.execute(
-                "INSERT INTO messages(sender_id, recipient_id, body, created_at, updated_at, conversation_id, parent_message_id, hop_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (sender_id, recipient_id, body, now, now, conversation_id or str(uuid.uuid4()), parent_message_id, hop_count),
+                "INSERT INTO messages(sender_id, recipient_id, body, created_at, updated_at, conversation_id, parent_message_id, hop_count, idempotency_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (sender_id, recipient_id, body, now, now, conversation_id or str(uuid.uuid4()), parent_message_id, hop_count, idempotency_key),
             )
             connection.commit()
             return int(cursor.lastrowid)
+
+    def message_by_idempotency_key(self, key: str) -> list[sqlite3.Row]:
+        with self.connection() as connection:
+            return connection.execute("SELECT * FROM messages WHERE idempotency_key=? ORDER BY id", (key,)).fetchall()
 
     def unread_count(self, agent_id: str) -> dict[str, int]:
         with self.connection() as connection:

@@ -256,6 +256,13 @@ class AgentMailTest(unittest.TestCase):
         with self.assertRaises(MailError): mailbox.send("writer", "reviewer", "12345")
         mailbox.send("writer", "reviewer", "1234")
 
+    def test_idempotency_key_returns_existing_message(self) -> None:
+        first = self.mailbox.send("writer", "reviewer", "一度だけ", idempotency_key="event-1")
+        second = self.mailbox.send("writer", "reviewer", "再試行", idempotency_key="event-1")
+        self.assertEqual(first, second)
+        with self.mailbox.connection() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM messages WHERE idempotency_key='event-1'").fetchone()[0], 1)
+
     @unittest.skipUnless(os.name == "posix", "file mode is platform dependent")
     def test_new_database_is_owner_only(self) -> None:
         path = self.mailbox.database

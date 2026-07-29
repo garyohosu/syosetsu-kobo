@@ -480,6 +480,28 @@ class ConceptManagerTest(unittest.TestCase):
         second=manager.publish(work); self.assertEqual(second["version"],2)
         self.assertTrue((self.root/published["path"]/"index.html").is_file(),"v001が残っていない")
 
+    def test_publish_records_revision_lineage_predecessor_and_digests(self):
+        work,manager,result=self.real_session()
+        instructions=self.root/"revision.md"; instructions.write_text("仮題を変える。",encoding="utf-8")
+        manager.action("select","C01",work_id=work)
+        manager.action("revise","C01",instruction_path=instructions,work_id=work)
+        published=manager.publish(work,predecessor_session_id="concept-previous-environment")
+        target=self.root/published["path"]
+        provenance=json.loads((target/"PROVENANCE.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["predecessor_session_id"],"concept-previous-environment")
+        self.assertIn("後継", provenance["predecessor_note"])
+        revision=provenance["revisions"][0]
+        self.assertEqual(revision["candidate"],"C01"); self.assertEqual(revision["revision"],1)
+        self.assertNotEqual(revision["revision_run_id"],revision["source_run_id"])
+        self.assertTrue(revision["instruction"].endswith("revision.md"))
+        digests=provenance["sha256"]
+        self.assertIn(Path(result["urs_path"]).name,"".join(digests["inputs"]))
+        for name in ("index.html","comparison.md","candidates/candidate-c01.md"):
+            self.assertEqual(len(digests["outputs"][name]),64,name)
+            self.assertEqual(digests["outputs"][name],
+                             __import__("hashlib").sha256((target/name).read_bytes()).hexdigest())
+        self.assertNotIn("PROVENANCE.json",digests["outputs"])
+
 
 class ReaderProfileSelectionTest(unittest.TestCase):
     def setUp(self):

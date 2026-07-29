@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -693,7 +694,10 @@ class ConceptManager:
         if self._is_dummy_session(session):
             raise KoboError(f"ダミーセッションでは{operation}できません。ダミー候補はテスト専用のfixtureです。実AI生成セッション（adapter=agy）を作成してください（concept-regenerate）")
 
-    def publish(self,work_id=None,session_id=None,*,selection_note=None):
+    def _sha256(self,path)->str:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def publish(self,work_id=None,session_id=None,*,selection_note=None,predecessor_session_id=None):
         """編集会議成果物をGit追跡下へ出版する。企画の確定ではない（instruction-20 §10）。"""
         session=self._session(work_id,session_id)
         self._reject_dummy(session,"Git追跡下へ出版")
@@ -717,6 +721,13 @@ class ConceptManager:
         atomic_write(target/"READER_PROFILE_USED.md",
                      f"# この編集会議で入力に使った読者プロファイル\n\n- 参照元: `{self._relative(session['urs_path'])}`\n"
                      f"- 版: v{session['urs_version']:03d}（セッション開始時に固定）\n- セッションID: `{session['session_id']}`\n\n---\n\n{profile_text}")
+        with self.orchestrator.connection() as db:
+            revision_rows=[dict(r) for r in db.execute("SELECT c.ordinal,r.revision,r.revision_run_id,r.source_run_id,r.instruction_path,r.attempts FROM concept_revisions r JOIN concept_candidates c ON c.candidate_id=r.candidate_id WHERE r.session_id=? ORDER BY c.ordinal,r.revision",(session["session_id"],))]
+        digests={"inputs":{self._relative(session["urs_path"]):self._sha256(session["urs_path"])},
+                 "outputs":{f.relative_to(target).as_posix():self._sha256(f) for f in sorted(target.rglob("*")) if f.is_file()}}
+        for row in revision_rows:
+            if Path(row["instruction_path"]).is_file():
+                digests["inputs"][self._relative(row["instruction_path"])]=self._sha256(row["instruction_path"])
         provenance={"session_id":session["session_id"],"work_id":session["work_id"],"adapter":session["adapter"],
                     "model":self._model_label("planner"),"evaluator_model":self._model_label("concept-reviewer"),"dummy":False,
                     "generated_at":now(),"status":session["status"],
@@ -728,7 +739,17 @@ class ConceptManager:
                                     "candidates":[self._relative(c["path"]) for c in candidates],
                                     "evaluations":[self._relative(e["path"]) for e in evaluations],
                                     "comparison":self._relative(comparison) if comparison.is_file() else None},
+                    "revisions":[{"candidate":f"C{row['ordinal']:02d}","revision":row["revision"],
+                                  "revision_run_id":row["revision_run_id"],"source_run_id":row["source_run_id"],
+                                  "instruction":self._relative(row["instruction_path"]),"attempts":row["attempts"]}
+                                 for row in revision_rows],
+                    "sha256":digests,
                     "note":"この出版は企画の確定ではない。利用者の明示選択が必要。"}
+        if predecessor_session_id:
+            provenance["predecessor_session_id"]=predecessor_session_id
+            provenance["predecessor_note"]=("別作業環境で生成された歴史上の元企画セッション。"
+                                            "`.kobo/state.db`はGit非追跡でマシン固有のため本環境のDBには存在しない。"
+                                            "本セッションはそれを否定・置換するものではなく、本環境で工程を継続するための後継セッションである。")
         atomic_write(target/"PROVENANCE.json",json.dumps(provenance,ensure_ascii=False,indent=2)+"\n")
         return {"path":self._relative(target),"version":version,"session_id":session["session_id"],
                 "candidate_count":len(candidates),"evaluation_count":len(evaluations),"status":session["status"]}

@@ -26,5 +26,32 @@
     ],
     "comparison": ".kobo/works/prototype-001/concepts/concept-83a021b88bae43d183ce6d37cd75e315/comparison.md"
   },
-  "note": "この出版は企画の確定ではない。利用者の明示選択が必要。"
+  "note": "この出版は企画の確定ではない。利用者の明示選択が必要。",
+  "revisions": [
+    {
+      "candidate": "C01",
+      "revision": 1,
+      "revision_run_id": "run-20260729T085608.280961Z-c39ba0edbca2",
+      "source_run_id": "run-20260729T084939.229451Z-3fc72dcffb36",
+      "instruction": "novels/prototype-001/C01_REVISION.v001.md",
+      "attempts": 1
+    }
+  ],
+  "predecessor_session_id": "concept-169e90deba774338951b29d14b076073",
+  "predecessor_note": "別作業環境で生成された歴史上の元企画セッション（editorial-board-v002）。`.kobo/state.db`はGit非追跡でマシン固有のため本環境のDBには存在しない。本セッションはそれを否定・置換するものではなく、本環境でC01の正式確定工程を継続するための後継セッションである。",
+  "sha256": {
+    "inputs": {
+      "novels/prototype-001/READER_PROFILE.v003.md": "edc0e0035d505ed0a6701eb94b64454ceecfa15cbfb22e4c46fde7e98b7f466a",
+      "novels/prototype-001/C01_REVISION.v001.md": "bbf87527b726986e71c0a0a886c86c479dc6e984503aadc1e5283f0ed85bb320",
+      "novels/prototype-001/CONCEPT.v001.md": "6853f06ca9dc1fc6ba2e77f9e3ec97b01ffc8198f48bbe7309cbc36e43b137f3"
+    },
+    "outputs": {
+      "candidates/candidate-c01.md": "d27c09c98be4dcd1d7da34f3238ff6039bf8a2af37a84b3ec6753d212e94bef6",
+      "comparison.md": "ab1232883dcc414c83ae3a6900d5c6ca7425cca971bdea9edec1888126fd3a62",
+      "evaluations/evaluation-c01.md": "35ae1b58c1094fcb968598fee3e6b685350b8db5e52bb37926633f06ae47b2fe",
+      "index.html": "fd4760a4c2c473a2dce52d610a98365c557a043ec70098803b00588ef67fb336",
+      "READER_PROFILE_USED.md": "baa58770f3fdee7cd55c626d8d86fce1277e8ad6fe06b1f41817dcec680145d8"
+    },
+    "note": "PROVENANCE.json自身は自己参照になるため対象外。"
+  }
 }

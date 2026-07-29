@@ -42,7 +42,7 @@ def parser() -> argparse.ArgumentParser:
     concept_start=sub.add_parser("concept-start"); concept_start.add_argument("--work"); concept_start.add_argument("--count",type=int,default=5)
     for name in ("concept-status","concept-list","concept-compare","concept-history","concept-preview","concept-finalize","concept-resume"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
-    publish=sub.add_parser("concept-publish"); publish.add_argument("--work"); publish.add_argument("--session"); publish.add_argument("--selection-note")
+    publish=sub.add_parser("concept-publish"); publish.add_argument("--work"); publish.add_argument("--session"); publish.add_argument("--selection-note"); publish.add_argument("--predecessor-session")
     sub.add_parser("concept-board").add_argument("--work");
     # concept-board also accepts --session; add it to the parser created above.
     # argparse returns the same parser object, so configure it explicitly.
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command=="concept-show": result=manager.candidate(args.candidate_id,args.work,args.session)
             elif args.command=="concept-compare": result=manager.comparisons(args.work,args.session)
             elif args.command=="concept-board": result=manager.board(args.work,args.session)
-            elif args.command=="concept-publish": result=manager.publish(args.work,args.session,selection_note=args.selection_note)
+            elif args.command=="concept-publish": result=manager.publish(args.work,args.session,selection_note=args.selection_note,predecessor_session_id=args.predecessor_session)
             elif args.command=="concept-select": result=manager.action("select",args.candidate_id,work_id=args.work,session_id=args.session)
             elif args.command=="concept-hold": result=manager.action("hold",work_id=args.work,session_id=args.session)
             elif args.command=="concept-reject-all": result=manager.action("reject_all",work_id=args.work,session_id=args.session)

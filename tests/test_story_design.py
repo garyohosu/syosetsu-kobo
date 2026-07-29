@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -122,6 +123,79 @@ class StoryDesignManagerTest(unittest.TestCase):
         retried=manager.revise_bible(self.work,session,instructions=instructions)
         self.assertEqual(retried["status"],"bible_awaiting_approval")
         self.assertEqual([d["revision"] for d in self.artifacts(session,"bible_draft")],[1,2])
+
+    def rebase_inputs(self):
+        concept=self.root/"novels"/self.work/"CONCEPT.v002.md"
+        concept.parent.mkdir(parents=True,exist_ok=True)
+        concept.write_text("# 作品企画（CONCEPT）\n\n- 版: 2\n\n黒猫の名はミルラ。妨害は流通と評判へ分散する。\n",encoding="utf-8")
+        rebase=self.root/"BIBLE_REBASE.v001.md"; rebase.write_text("## 再接続\n\n黒猫をミルラへ統一する。",encoding="utf-8")
+        return concept,rebase
+
+    def test_bible_rebase_records_both_concepts_and_writes_r003(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        concept,rebase=self.rebase_inputs()
+        before=[dict(r) for r in self.artifacts(session,"bible_draft")]
+        before_texts={a["path"]:Path(a["path"]).read_text(encoding="utf-8") for a in before}
+        result=manager.rebase_bible(self.work,session,concept=concept,instructions=rebase)
+        drafts=self.artifacts(session,"bible_draft"); audits=self.artifacts(session,"bible_audit")
+        self.assertEqual([d["revision"] for d in drafts],[1,2,3])
+        self.assertEqual([a["revision"] for a in audits],[1,2,3])
+        for path,text in before_texts.items():
+            self.assertEqual(Path(path).read_text(encoding="utf-8"),text,"r001/r002が変更された")
+        self.assertTrue(drafts[2]["path"].endswith("bible_draft.r003.md"))
+        self.assertEqual(drafts[2]["status"],"rebased")
+        self.assertEqual(drafts[2]["source_path"],drafts[1]["path"],"r003のsourceがr002")
+        self.assertEqual(result["status"],"bible_awaiting_approval")
+        # セッションの正本CONCEPTがv002へ差し替わる
+        self.assertTrue(result["concept_path"].endswith("CONCEPT.v002.md"))
+        self.assertEqual(result["concept_version"],2)
+
+    def test_bible_rebase_logs_concept_rebase_with_versions_and_digests(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        concept,rebase=self.rebase_inputs()
+        old_path=Path(manager.status(self.work,session)["concept_path"])
+        manager.rebase_bible(self.work,session,concept=concept,instructions=rebase)
+        with self.orch.connection() as db:
+            rows={r["action"]:r["instruction_path"] for r in db.execute("SELECT action,instruction_path FROM story_design_actions WHERE session_id=?",(session,))}
+        self.assertIn("concept_rebase",rows); self.assertIn("rebase",rows)
+        note=rows["concept_rebase"]
+        self.assertIn(old_path.name,note); self.assertIn("CONCEPT.v002.md",note)
+        self.assertIn(hashlib.sha256(old_path.read_bytes()).hexdigest(),note)
+        self.assertIn(hashlib.sha256(concept.read_bytes()).hexdigest(),note)
+        self.assertTrue(rows["rebase"].endswith("BIBLE_REBASE.v001.md"))
+
+    def test_bible_rebase_requires_awaiting_approval_and_new_concept(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        concept,rebase=self.rebase_inputs()
+        current=manager.status(self.work,session)["concept_path"]
+        with self.assertRaisesRegex(KoboError,"同じCONCEPT"):
+            manager.rebase_bible(self.work,session,concept=current,instructions=rebase)
+        with self.assertRaisesRegex(KoboError,"再接続指示ファイル"):
+            manager.rebase_bible(self.work,session,concept=concept)
+        manager.approve("bible",self.work,session); manager.finalize_bible(self.work,session)
+        with self.assertRaisesRegex(KoboError,"承認待ち"):
+            manager.rebase_bible(self.work,session,concept=concept,instructions=rebase)
+
+    def test_bible_rebase_uses_separate_runs_and_does_not_approve(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        concept,rebase=self.rebase_inputs()
+        manager.rebase_bible(self.work,session,concept=concept,instructions=rebase)
+        drafts=self.artifacts(session,"bible_draft"); audits=self.artifacts(session,"bible_audit")
+        runs={a["run_id"] for a in drafts}|{a["run_id"] for a in audits}
+        self.assertEqual(len(runs),6,"6件すべて別run")
+        self.assertEqual(drafts[2]["agent_id"],"story-architect")
+        self.assertEqual(audits[2]["agent_id"],"continuity-reviewer")
+        with self.orch.connection() as db:
+            docs=db.execute("SELECT COUNT(*) FROM story_design_documents WHERE session_id=?",(session,)).fetchone()[0]
+            approvals=db.execute("SELECT COUNT(*) FROM story_design_actions WHERE session_id=? AND action='approve'",(session,)).fetchone()[0]
+        self.assertEqual((docs,approvals),(0,0))
 
     def test_bible_revision_does_not_auto_approve_or_finalize(self):
         manager,started,instructions=self.real_bible()

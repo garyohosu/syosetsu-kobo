@@ -51,10 +51,12 @@ def parser() -> argparse.ArgumentParser:
     select=sub.add_parser("concept-select"); select.add_argument("candidate_id"); select.add_argument("--work"); select.add_argument("--session")
     for name in ("concept-hold","concept-reject-all","concept-regenerate"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    amend=sub.add_parser("concept-amend"); amend.add_argument("--instructions",type=Path,required=True); amend.add_argument("--preserve"); amend.add_argument("--work"); amend.add_argument("--session")
     revise=sub.add_parser("concept-revise"); revise.add_argument("candidate_id"); revise.add_argument("--instructions",type=Path,required=True); revise.add_argument("--work"); revise.add_argument("--session")
     for name in ("story-start", "story-resume", "story-status"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
     revise_bible=sub.add_parser("story-revise-bible"); revise_bible.add_argument("--instructions",type=Path,required=True); revise_bible.add_argument("--work"); revise_bible.add_argument("--session")
+    rebase=sub.add_parser("story-rebase-bible"); rebase.add_argument("--concept",type=Path,required=True); rebase.add_argument("--instructions",type=Path,required=True); rebase.add_argument("--work"); rebase.add_argument("--session")
     show=sub.add_parser("story-show"); show.add_argument("kind", choices=("bible_draft","bible_audit","plot_draft","plot_audit","bible","plot")); show.add_argument("--work"); show.add_argument("--session")
     for name in ("story-approve-bible", "story-finalize-bible", "story-start-plot", "story-approve-plot", "story-finalize-plot"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
@@ -172,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             manager=StoryDesignManager(orchestrator,dummy=args.dummy)
             if args.command=="story-start": result=manager.start(args.work)
             elif args.command=="story-resume": result=manager.resume(args.work,args.session)
+            elif args.command=="story-rebase-bible": result=manager.rebase_bible(args.work,args.session,concept=args.concept,instructions=args.instructions)
             elif args.command=="story-revise-bible": result=manager.revise_bible(args.work,args.session,instructions=args.instructions)
             elif args.command=="story-status": result=manager.status(args.work,args.session)
             elif args.command=="story-show": result=manager.show(args.kind,args.work,args.session)
@@ -188,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command=="concept-show": result=manager.candidate(args.candidate_id,args.work,args.session)
             elif args.command=="concept-compare": result=manager.comparisons(args.work,args.session)
             elif args.command=="concept-board": result=manager.board(args.work,args.session)
+            elif args.command=="concept-amend": result=manager.amend_concept(args.work,args.session,instructions=args.instructions,preserve=tuple(x for x in (args.preserve or "").split(",") if x.strip()))
             elif args.command=="concept-publish": result=manager.publish(args.work,args.session,selection_note=args.selection_note,predecessor_session_id=args.predecessor_session)
             elif args.command=="concept-select": result=manager.action("select",args.candidate_id,work_id=args.work,session_id=args.session)
             elif args.command=="concept-hold": result=manager.action("hold",work_id=args.work,session_id=args.session)

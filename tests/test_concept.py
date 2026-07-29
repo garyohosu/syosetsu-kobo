@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import tempfile
@@ -5,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from kobo.concept import (CANDIDATE_DIRECTIONS, EVALUATION_AXES, POSITION_MARKERS, QUALITY_ERROR,
-                          REQUIRED_CANDIDATE_HEADINGS, ConceptManager, latest_reader_profile, text_quality_problems)
+                          REQUIRED_CANDIDATE_HEADINGS, ConceptManager, _sections, latest_reader_profile, text_quality_problems)
 from kobo.orchestrator import Adapter, Config, KoboError, Orchestrator, atomic_write
 from kobo.urs import UrsManager
 from tests.test_orchestrator import definition
@@ -72,7 +73,8 @@ class RecordingAgyAdapter(Adapter):
         if agent.agent_id == "story-architect":
             if self.always_fail_bible:
                 atomic_write(output_path, "# 見出しの足りないバイブル\n\n## 作品の核\n\n不完全。\n"); return
-            atomic_write(output_path, bible_markdown(revised="改訂指示" in prompt)); return
+            revised = ("改訂指示" in prompt) or ("再接続指示" in prompt)
+            atomic_write(output_path, bible_markdown(revised=revised)); return
         if agent.agent_id == "continuity-reviewer":
             atomic_write(output_path, bible_audit_markdown()); return
         if agent.agent_id == "concept-reviewer":
@@ -87,7 +89,12 @@ class RecordingAgyAdapter(Adapter):
             atomic_write(output_path, fixed); return
         if "改訂対象の既存案" in prompt:  # 実AIによる候補改訂
             ordinal = int(re.search(r"企画候補 C(\d+)", prompt).group(1))
-            atomic_write(output_path, candidate_markdown(ordinal, title="改訂後の仮題")); return
+            revised = candidate_markdown(ordinal, title="改訂後の仮題")
+            # 保全対象（ログライン）と範囲内（連載の推進力）の両方を書き換え、
+            # 差し戻しが保全対象だけに効くことを確認できるようにする
+            revised = revised.replace("ことを選ぶ話。", "ことを選ぶ話。改訂済み。", 1)
+            revised = revised.replace("次話を動かす。", "次話を動かす。改訂反映。", 1)
+            atomic_write(output_path, revised); return
         ordinal = int(re.search(r"候補C(\d+)", prompt).group(1))
         if self.always_fail_candidates or self.candidate_failures > 0:
             if not self.always_fail_candidates: self.candidate_failures -= 1
@@ -436,6 +443,76 @@ class ConceptManagerTest(unittest.TestCase):
         with self.assertRaisesRegex(KoboError,"ダミー"):
             manager.action("revise","C01",instruction_path=instructions,work_id=work)
         self.assertEqual(manager.revisions(work_id=work),[])
+
+    def test_concept_amendment_is_versioned_and_never_overwrites_v001(self):
+        work,manager,_=self.real_session()
+        manager.action("select","C01",work_id=work); first=manager.finalize(work)
+        v001=Path(first["path"]); v001_text=v001.read_text(encoding="utf-8")
+        instructions=self.root/"CONCEPT_AMENDMENT.v001.md"; instructions.write_text("仮題を変える。",encoding="utf-8")
+        amended=manager.amend_concept(work,instructions=instructions)
+        self.assertEqual(amended["version"],2)
+        self.assertEqual(v001.read_text(encoding="utf-8"),v001_text,"v001が変更された")
+        self.assertEqual(amended["source_sha256"],hashlib.sha256(v001_text.encode("utf-8")).hexdigest())
+        published=self.root/amended["published_path"]
+        self.assertTrue(published.is_file()); self.assertTrue(published.name.endswith("CONCEPT.v002.md"))
+        self.assertEqual(amended["sha256"],hashlib.sha256(published.read_bytes()).hexdigest())
+        self.assertIn("改訂後の仮題",published.read_text(encoding="utf-8"))
+        rows=manager.amendments(work)
+        self.assertEqual(len(rows),1); self.assertEqual(rows[0]["version"],2)
+        self.assertTrue(rows[0]["instruction_path"].endswith("CONCEPT_AMENDMENT.v001.md"))
+        self.assertEqual(manager.latest_concept(work)["version"],2)
+
+    def test_concept_amendment_restores_preserved_sections_verbatim(self):
+        """モデルが保全対象を書き換えても、原文が機械的に差し戻される。"""
+        work,manager,_=self.real_session()
+        manager.action("select","C01",work_id=work); first=manager.finalize(work)
+        source=Path(first["path"]).read_text(encoding="utf-8")
+        original=_sections(source)
+        instructions=self.root/"amend.md"; instructions.write_text("仮題を変える。",encoding="utf-8")
+        preserve=("ログライン","一行コンセプト","主人公")
+        amended=manager.amend_concept(work,instructions=instructions,preserve=preserve)
+        after=_sections((self.root/amended["published_path"]).read_text(encoding="utf-8"))
+        for heading in preserve:
+            self.assertEqual(after[heading],original[heading],f"{heading}が原文と異なる")
+        # スタブはログラインへ「改訂済み。」を足すが、差し戻しで消える
+        self.assertNotIn("改訂済み",after["ログライン"])
+        # 題名も維持される
+        self.assertIn("案1の仮題",(self.root/amended["published_path"]).read_text(encoding="utf-8"))
+        # 範囲内の見出しは改訂が反映される
+        self.assertIn("改訂反映",after["連載の推進力"])
+        self.assertNotEqual(after["連載の推進力"],original["連載の推進力"])
+
+    def test_concept_amendment_rejects_unknown_preserved_heading(self):
+        work,manager,_=self.real_session()
+        manager.action("select","C01",work_id=work); manager.finalize(work)
+        instructions=self.root/"amend.md"; instructions.write_text("指示。",encoding="utf-8")
+        with self.assertRaisesRegex(KoboError,"保全対象の見出しがありません"):
+            manager.amend_concept(work,instructions=instructions,preserve=("存在しない見出し",))
+        self.assertEqual(manager.amendments(work),[])
+
+    def test_concept_amendment_baseline_is_the_confirmed_concept_not_latest_revision(self):
+        """先に候補改訂が入っていても、保全判定と差し戻しの基準は確定CONCEPTのまま。"""
+        work,manager,_=self.real_session()
+        manager.action("select","C01",work_id=work); first=manager.finalize(work)
+        original=_sections(Path(first["path"]).read_text(encoding="utf-8"))
+        instructions=self.root/"amend.md"; instructions.write_text("仮題を変える。",encoding="utf-8")
+        # 中止した改訂が候補改訂を残した状況を再現する（保全指定なしで改訂だけ走らせる）
+        manager._revise_candidate(manager._session(work),manager.candidate("C01",work),instructions)
+        drifted=manager.candidate("C01",work)
+        self.assertIn("改訂済み",_sections(drifted["content"])["ログライン"],"基準がずれる状況を再現できていない")
+        # それでも確定CONCEPTを基準に差し戻される
+        amended=manager.amend_concept(work,instructions=instructions,preserve=("ログライン",))
+        after=_sections((self.root/amended["published_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(after["ログライン"],original["ログライン"])
+        self.assertNotIn("改訂済み",after["ログライン"])
+
+    def test_concept_amendment_rejects_dummy_and_requires_instructions(self):
+        work=self.make_work(); dummy=ConceptManager(self.orch,dummy=True); dummy.start(work)
+        instructions=self.root/"amend.md"; instructions.write_text("指示。",encoding="utf-8")
+        with self.assertRaisesRegex(KoboError,"ダミー"): dummy.amend_concept(work,instructions=instructions)
+        work2,manager,_=self.real_session()
+        manager.action("select","C01",work_id=work2); manager.finalize(work2)
+        with self.assertRaisesRegex(KoboError,"改訂指示ファイル"): manager.amend_concept(work2)
 
     def test_stale_profile_registration_does_not_beat_newer_file(self):
         """一度v001で企画を作った後にv002を置いたら、次のセッションはv002を使う。"""

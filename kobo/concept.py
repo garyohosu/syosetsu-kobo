@@ -61,6 +61,24 @@ def latest_reader_profile(directory: Path):
     return best, (best_version if best else 0)
 
 
+PARTICLE_OF = re.compile(rf"([{_JA}])\s+of\s+([{_JA}])", re.IGNORECASE)
+
+
+def repair_particle_of(text: str):
+    """日本語の名詞間へ現れた`of`を助詞「の」へ戻す。
+
+    実モデルが長い日本語生成で「瀕死の重傷」を「瀕死 of 重傷」と書く既知の不具合への対処。
+    日本語文字に挟まれた`of`は助詞「の」以外に解釈しようがないため、機械的に直せる。
+    他の混入（ハングル、置換文字、`of`以外の機能語）は直さず、検証で不合格にする。
+    """
+    total = 0
+    for _ in range(3):  # 「A of B of C」のように連続する場合に取りこぼさない
+        text, count = PARTICLE_OF.subn(r"\1の\2", text)
+        total += count
+        if not count: break
+    return text, total
+
+
 def text_quality_problems(text: str) -> list[str]:
     """利用者向け本文の文字混入を検出する。正当な英単語やコードは許可する。"""
     problems = []
@@ -121,6 +139,7 @@ class ConceptManager:
             CREATE TABLE IF NOT EXISTS concept_evaluations(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), candidate_id TEXT NOT NULL REFERENCES concept_candidates(candidate_id), path TEXT NOT NULL UNIQUE, evaluation_run_id TEXT NOT NULL UNIQUE, evaluator_id TEXT NOT NULL, recommendation_rank INTEGER, created_at TEXT NOT NULL, UNIQUE(session_id,candidate_id));
             CREATE TABLE IF NOT EXISTS concept_actions(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), action TEXT NOT NULL, candidate_id TEXT, instruction_path TEXT, note TEXT, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS concept_documents(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE REFERENCES concept_sessions(session_id), version INTEGER NOT NULL, path TEXT NOT NULL UNIQUE, candidate_id TEXT NOT NULL, urs_path TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS concept_amendments(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), work_id TEXT NOT NULL, version INTEGER NOT NULL, path TEXT NOT NULL UNIQUE, published_path TEXT, source_path TEXT NOT NULL, source_sha256 TEXT NOT NULL, sha256 TEXT NOT NULL, instruction_path TEXT NOT NULL, candidate_revision INTEGER NOT NULL, revision_run_id TEXT NOT NULL, preserved TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(work_id,version));
             CREATE TABLE IF NOT EXISTS concept_revisions(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), candidate_id TEXT NOT NULL REFERENCES concept_candidates(candidate_id), revision INTEGER NOT NULL, path TEXT NOT NULL UNIQUE, revision_run_id TEXT NOT NULL UNIQUE, source_run_id TEXT NOT NULL, instruction_path TEXT NOT NULL, attempts INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(candidate_id,revision));
             """)
 
@@ -591,7 +610,7 @@ class ConceptManager:
             query+=" AND candidate_id=?"; params.append(self.candidate(candidate_id,session["work_id"],session["session_id"])["candidate_id"])
         with self.orchestrator.connection() as db: return [dict(r) for r in db.execute(query+" ORDER BY revision",params)]
 
-    def _revision_prompt(self,candidate,instructions,feedback=None,repair_source=None)->str:
+    def _revision_prompt(self,candidate,instructions,feedback=None,repair_source=None,preserve=())->str:
         if repair_source: return self._repair_prompt(feedback,repair_source)
         parts=["あなたは日本語web小説の企画編集者です。既存の企画ラフを、確定した改訂指示に沿って改訂してください。","",
                "## 絶対条件",
@@ -609,10 +628,15 @@ class ConceptManager:
                "- 作り直しではなく改訂である。既存案の骨格を大きく捨てない。","",
                "## 改訂指示（確定事項。最優先）",instructions,"",
                "## 改訂対象の既存案",candidate["content"]]
+        if preserve:
+            parts += ["","## 一字も変更してはいけない見出し",
+                      "次の見出しは、既存案の本文を**そのまま逐語で再掲**すること。語順、句読点、表記を一切変えない。言い換え、要約、加筆をしない。",
+                      *[f"- {heading}" for heading in preserve],
+                      "これらを書き換えた出力は不合格として破棄される。"]
         if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
         return "\n".join(parts)
 
-    def _revise_candidate(self,session,candidate,instruction_path):
+    def _revise_candidate(self,session,candidate,instruction_path,preserve=(),preserve_text=None,preserve_title=None):
         """実AIで候補を改訂する。原本を上書きせず新しい改訂版として保存する。"""
         agent=self.orchestrator.agents["planner"]; limit=max(1,min(agent.max_attempts,3))
         instructions=Path(instruction_path).read_text(encoding="utf-8").strip()
@@ -625,10 +649,15 @@ class ConceptManager:
         feedback=None; repair_source=None; failures=[]
         for attempt in range(1,limit+1):
             raw_path=attempts_dir/f"c{candidate['ordinal']:02d}-rev{revision:02d}-attempt-{attempt}.md"
-            prompt=self._revision_prompt(candidate,instructions,feedback,repair_source)
+            prompt=self._revision_prompt(candidate,instructions,feedback,repair_source,preserve)
             try:
                 raw=self._run_agent("planner",prompt,raw_path,run_id,session)
                 text=self._normalize_candidate(session,candidate["ordinal"],run_id,raw)
+                if preserve_text:
+                    # 変更禁止の見出しは、モデルの転記に頼らず原文を機械的に差し戻す。
+                    sections=_sections(text); sections.update(preserve_text)
+                    text=self._assemble_candidate(session,candidate["ordinal"],run_id,
+                                                  preserve_title or _document_title(text),sections)
                 self._validate_candidate(text)
                 atomic_write(path,text); timestamp=now()
                 with self.orchestrator.connection() as db:
@@ -753,6 +782,59 @@ class ConceptManager:
         atomic_write(target/"PROVENANCE.json",json.dumps(provenance,ensure_ascii=False,indent=2)+"\n")
         return {"path":self._relative(target),"version":version,"session_id":session["session_id"],
                 "candidate_count":len(candidates),"evaluation_count":len(evaluations),"status":session["status"]}
+
+    def latest_concept(self,work_id):
+        """確定CONCEPTと改訂版のうち、版番号が最大のものを返す。"""
+        with self.orchestrator.connection() as db:
+            document=db.execute("SELECT d.version,d.path FROM concept_documents d JOIN concept_sessions s ON s.session_id=d.session_id WHERE s.work_id=? ORDER BY d.version DESC LIMIT 1",(work_id,)).fetchone()
+            amendment=db.execute("SELECT version,path FROM concept_amendments WHERE work_id=? ORDER BY version DESC LIMIT 1",(work_id,)).fetchone()
+        best=None
+        for row in (document,amendment):
+            if row and (best is None or row["version"]>best["version"]): best=row
+        if not best: raise KoboError("確定済みCONCEPTがありません")
+        return {"version":best["version"],"path":best["path"]}
+
+    def amendments(self,work_id=None):
+        work=self._work(work_id)
+        with self.orchestrator.connection() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM concept_amendments WHERE work_id=? ORDER BY version",(work["work_id"],))]
+
+    def amend_concept(self,work_id=None,session_id=None,*,instructions=None,preserve=()):
+        """確定CONCEPTを、利用者確定事項にもとづき非上書きで版付き改訂する。v001は変更しない。"""
+        session=self._session(work_id,session_id)
+        self._reject_dummy(session,"CONCEPTを改訂")
+        if not instructions: raise KoboError("改訂指示ファイルが必要です")
+        instruction_path=safe_path(self.orchestrator.config.root,instructions,must_exist=True)
+        if instruction_path.suffix.lower() not in (".md",".json"): raise KoboError("改訂指示はUTF-8 MarkdownまたはJSONにしてください")
+        current=self.latest_concept(session["work_id"])
+        source=safe_path(self.orchestrator.config.root,current["path"],must_exist=True)
+        source_sha=self._sha256(source)
+        before=self.candidate(self._selected(session)[1]["candidate_id"],session["work_id"],session["session_id"])
+        # 保全判定の基準は、改訂対象である確定CONCEPTの本文そのものにする。
+        # 直前の中止で候補改訂が残っている場合があり、最新候補を基準にすると基準側がずれる。
+        keep={heading:_sections(source.read_text(encoding="utf-8")).get(heading) for heading in preserve}
+        missing=[heading for heading,text in keep.items() if text is None]
+        if missing: raise KoboError(f"改訂対象CONCEPTに保全対象の見出しがありません: {missing}")
+        title=re.search(r"^#\s+企画候補\s+C\d+\s*[:：]\s*(.+?)\s*$",source.read_text(encoding="utf-8"),re.MULTILINE)
+        revised=self._revise_candidate(session,before,instruction_path,preserve,
+                                       preserve_text=keep or None,preserve_title=title.group(1) if title else None)
+        after=self.candidate(before["candidate_id"],session["work_id"],session["session_id"])
+        changed=[heading for heading,text in keep.items() if _sections(after["content"]).get(heading)!=text]
+        if changed:
+            raise KoboError(f"改訂範囲外の見出しが変更されました: {changed}。CONCEPT改訂を中止しました（候補改訂第{revised['revision']}版は履歴として保持）")
+        version=current["version"]+1
+        path=self.orchestrator.config.store/"works"/session["work_id"]/"concepts"/f"CONCEPT.v{version:03d}.md"
+        published=self.orchestrator.config.root/"novels"/session["work_id"]/f"CONCEPT.v{version:03d}.md"
+        if path.exists() or published.exists(): raise KoboError("既存CONCEPT版の上書きを拒否しました")
+        text=self._render(session,version,True)
+        atomic_write(path,text); atomic_write(published,text); timestamp=now()
+        with self.orchestrator.connection() as db:
+            db.execute("INSERT INTO concept_amendments(session_id,work_id,version,path,published_path,source_path,source_sha256,sha256,instruction_path,candidate_revision,revision_run_id,preserved,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (session["session_id"],session["work_id"],version,str(path),str(published),str(source),source_sha,self._sha256(path),str(instruction_path),revised["revision"],revised["revision_run_id"],",".join(preserve),timestamp))
+        return {"version":version,"path":self._relative(path),"published_path":self._relative(published),
+                "sha256":self._sha256(path),"source_path":self._relative(source),"source_sha256":source_sha,
+                "candidate_revision":revised["revision"],"revision_run_id":revised["revision_run_id"],
+                "preserved":list(preserve),"created_at":timestamp}
 
     def action(self,action,candidate_id=None,*,instruction_path=None,note=None,work_id=None,session_id=None):
         if action not in ACTIONS: raise KoboError("企画操作が不正です")

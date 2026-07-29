@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from .concept import text_quality_problems
+from .concept import repair_particle_of, text_quality_problems
 from .orchestrator import KoboError, atomic_write, now, safe_path
 
 
@@ -44,7 +44,12 @@ class StoryDesignManager:
     def _latest_concept(self, work_id):
         with self.orchestrator.connection() as db:
             row=db.execute("SELECT d.id,d.version,d.path,d.urs_path FROM concept_documents d JOIN concept_sessions s ON s.session_id=d.session_id WHERE s.work_id=? ORDER BY d.version DESC LIMIT 1",(work_id,)).fetchone()
+            # 版付き改訂（CONCEPT.vNNN）がある場合は、より新しい版を正本にする。
+            try: amendment=db.execute("SELECT version,path FROM concept_amendments WHERE work_id=? ORDER BY version DESC LIMIT 1",(work_id,)).fetchone()
+            except sqlite3.OperationalError: amendment=None
         if not row: raise KoboError("確定済みCONCEPTがありません")
+        if amendment and amendment["version"]>row["version"]:
+            row=dict(row); row["version"]=amendment["version"]; row["path"]=amendment["path"]
         return row,safe_path(self.orchestrator.config.root,row["path"],must_exist=True)
 
     def _handoff_mail(self, work_id, concept_path):
@@ -135,6 +140,8 @@ class StoryDesignManager:
             text=raw.read_text(encoding="utf-8").strip()
             lines=text.splitlines()
             if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            text,repaired=repair_particle_of(text)
+            if repaired: atomic_write(raw.with_name(raw.stem+".repaired.txt"),f"助詞「の」へ戻した`of`の件数: {repaired}")
             try:
                 self._validate(text,headings,stage)
                 problems=text_quality_problems(text)
@@ -162,6 +169,8 @@ class StoryDesignManager:
             text=raw.read_text(encoding="utf-8").strip()
             lines=text.splitlines()
             if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            text,repaired=repair_particle_of(text)
+            if repaired: atomic_write(raw.with_name(raw.stem+".repaired.txt"),f"助詞「の」へ戻した`of`の件数: {repaired}")
             try:
                 self._validate_audit(text,axes); return text
             except KoboError as error:
@@ -247,7 +256,7 @@ class StoryDesignManager:
                "- 改訂指示に書かれた3点は必ず反映する。",
                "- 作り直しではなく改訂である。指示された箇所以外の設計を不必要に作り替えない。",
                "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。",
-               "- **日本語の助詞「の」を英単語 of で置き換えない。**「瀕死 of 重傷」ではなく「瀕死の重傷」と書く。同様に the、and、in なども日本語の語の間へ挟まない。",
+               "- 名詞と名詞をつなぐ位置へ英語の前置詞を書かない。日本語の連体助詞を使う。この規則自体を本文へ書き写さない。",
                "- 既存作品の固有名詞、人物設定、台詞、場面、事件を直接流用しない。","",
                "## 改訂指示（確定事項。最優先）",instructions,"",
                "## 正本（確定CONCEPT。変更禁止）",concept,"",
@@ -267,8 +276,8 @@ class StoryDesignManager:
             "- **ファイルを作成・保存しない。** 修復後の全文を標準出力へ書き出す。",
             "- 設計内容、登場人物、構造、見出し、順序を一切変更しない。",
             "- 検出された混入文字だけを、文脈に合う自然な日本語へ直す。",
-            "- 特に、日本語の助詞「の」を英単語 of へ置き換えている箇所をすべて「の」へ戻す。",
-            "  例: 「瀕死 of 重傷」→「瀕死の重傷」、「森 of 小屋」→「森の小屋」。",
+            "- 名詞間の英語前置詞は、日本語の連体助詞へ戻す。",
+            "- 修復の指示文そのものを本文へ書き写さない。",
             "- 新しい設定や表現を足さない。",
             "- 出力はMarkdown本体のみ。前置き、コードフェンス、説明を付けない。",
             "",
@@ -294,6 +303,8 @@ class StoryDesignManager:
             text=raw.read_text(encoding="utf-8").strip()
             lines=text.splitlines()
             if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            text,repaired=repair_particle_of(text)
+            if repaired: atomic_write(raw.with_name(raw.stem+".repaired.txt"),f"助詞「の」へ戻した`of`の件数: {repaired}")
             try:
                 self._validate(text,headings,"bible")
                 problems=text_quality_problems(text)
@@ -305,6 +316,137 @@ class StoryDesignManager:
                 repair_source=text if ("文字品質エラー" in feedback and text) else None
                 atomic_write(attempts/f"bible-revise-attempt-{attempt}.error.txt",f"{error}\n")
         raise KoboError(f"バイブル改訂の実AI生成が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    REBASE_CHECKS = (
+        "CONCEPT.v002とバイブルで黒猫の名前が一致しているか（ミルラ）。",
+        "CONCEPT v001からの変更が、黒猫の名前と敵の妨害トーンの2点だけか。",
+        "武官が治療禁止違反を認識した上で処分を保留しているか。",
+        "通常回が刺客との戦闘中心になっていないか。",
+        "辺境での実績と証拠が宮廷復帰へ届く具体的な経路（記録者、運搬者、受理組織、妨害点、簡単に復権できない理由）があるか。",
+        "主要な薬草・毒物・魔獣の固有名に明白な模倣リスクがないか。",
+        "後出し能力や万能治療がないか。",
+    )
+
+    def _sha256(self, path)->str:
+        import hashlib
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def _rebase_prompt(self, session, concept_text, draft_text, audit_text, instructions, headings, feedback=None)->str:
+        parts=["あなたはストーリーバイブルの設計担当です。正本CONCEPTが新しい版へ差し替わりました。既存の草案を新しい正本へ整合させてください。","",
+               "## 絶対条件",
+               "- **ファイルを作成・保存しない。** 成果物は標準出力へ直接書き出す。",
+               "- 出力はMarkdown本体のみ。前置き、後書き、コードフェンス、報告文を付けない。",
+               "- 小説の本文は書かない。設計資料だけを書く。",
+               f"- 見出しは次の{len(headings)}個を、この順で過不足なく `## 見出し` として書く: {' / '.join(headings)}",
+               "- 新しい正本CONCEPT（v002）の確定事項を変更・否定しない。",
+               "- **既存草案で既に改善済みの内容を後退させない。** 特に、武官が治療禁止違反を認識した上で処分を保留する葛藤と、敵の妨害を政治・流通・評判・証拠隠蔽へ分散した連載トーンは維持する。",
+               "- 黒猫の名前は全箇所「ミルラ」に統一する。「ルナ」を残さない。ただし敵役「ベルナール」は変更しない。",
+               "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。",
+               "- 名詞と名詞をつなぐ位置へ英語の前置詞を書かない。日本語の連体助詞を使う。この規則自体を本文へ書き写さない。",
+               "- 既存作品の固有名詞、人物設定、台詞、場面、事件を直接流用しない。","",
+               "## 再接続指示（確定事項。最優先）",instructions,"",
+               "## 新しい正本（CONCEPT v002。変更禁止）",concept_text,"",
+               "## 基礎にする既存草案（r002）",draft_text,"",
+               "## 直前の独立監査結果（残る指摘も解消する）",audit_text]
+        if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
+        return "\n".join(parts)
+
+    def _run_bible_rebase(self, session, concept_path, draft, audit, instruction_path, run_id, directory, headings)->str:
+        agent=self.orchestrator.agents["story-architect"]; limit=max(1,min(agent.max_attempts,3))
+        concept_text=Path(concept_path).read_text(encoding="utf-8")
+        draft_text=Path(draft["path"]).read_text(encoding="utf-8")
+        audit_text=Path(audit["path"]).read_text(encoding="utf-8")
+        instructions=Path(instruction_path).read_text(encoding="utf-8").strip()
+        attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
+        feedback=None; failures=[]; repair_source=None
+        for attempt in range(1,limit+1):
+            raw=attempts/f"bible-rebase-attempt-{attempt}.md"
+            prompt=(self._quality_repair_prompt(feedback,repair_source) if repair_source
+                    else self._rebase_prompt(session,concept_text,draft_text,audit_text,instructions,headings,feedback))
+            refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get("story-architect",agent.model),
+                  "run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),
+                  "mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
+            self.orchestrator._adapter(agent).execute(agent,refs,raw)
+            text=raw.read_text(encoding="utf-8").strip()
+            lines=text.splitlines()
+            if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            text,repaired=repair_particle_of(text)
+            if repaired: atomic_write(raw.with_name(raw.stem+".repaired.txt"),f"助詞「の」へ戻した`of`の件数: {repaired}")
+            try:
+                self._validate(text,headings,"bible")
+                problems=text_quality_problems(text)
+                if problems: raise KoboError("文字品質エラー: "+" / ".join(problems))
+                if re.search(r"(?<!ベ)(?<!ベル)ルナ(?!ール)",text):
+                    raise KoboError("黒猫の名前が「ミルラ」へ統一されていません（「ルナ」が残っています）")
+                return text
+            except KoboError as error:
+                feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                repair_source=text if ("文字品質エラー" in feedback and text) else None
+                atomic_write(attempts/f"bible-rebase-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"バイブル再接続の実AI生成が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    def rebase_bible(self, work_id=None, session_id=None, *, concept=None, instructions=None):
+        """正本CONCEPTを新しい版へ差し替え、草案を整合させて独立再監査する。承認・確定はしない。"""
+        session=self._session(work_id,session_id)
+        retryable=session["status"]=="failed" and self._artifact(session["session_id"],"bible_draft") and not self._document(session["session_id"],"bible")
+        if session["status"]!="bible_awaiting_approval" and not retryable:
+            raise KoboError("承認待ちのバイブルだけを再接続できます")
+        if not concept: raise KoboError("新しいCONCEPTのパスが必要です")
+        if not instructions: raise KoboError("再接続指示ファイルが必要です")
+        concept_path=safe_path(self.orchestrator.config.root,concept,must_exist=True)
+        instruction_path=safe_path(self.orchestrator.config.root,instructions,must_exist=True)
+        if str(concept_path)==str(session["concept_path"]): raise KoboError("現在と同じCONCEPTへは再接続できません")
+        draft=self._artifact(session["session_id"],"bible_draft"); audit=self._artifact(session["session_id"],"bible_audit")
+        if not draft or not audit: raise KoboError("再接続の基礎になる草案と監査がそろっていません")
+        old_path=Path(session["concept_path"]); old_version=session["concept_version"]
+        new_version=self._concept_version(concept_path,old_version)
+        directory=self._dir(session); revision=draft["revision"]+1
+        path=directory/f"bible_draft.r{revision:03d}.md"; audit_path=directory/f"bible_audit.r{revision:03d}.md"
+        if path.exists() or audit_path.exists(): raise KoboError("既存改訂版の上書きを拒否しました")
+        try:
+            run_id=self.orchestrator._new_run_id()
+            if self.dummy:
+                text=self._dummy(session,"bible"); self._validate(text,BIBLE_HEADINGS,"bible")
+            else:
+                text=self._run_bible_rebase(session,concept_path,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS)
+            atomic_write(path,text); timestamp=now()
+            note=(f"concept_rebase: {old_path.name}(v{old_version:03d}, sha256={self._sha256(old_path)}) -> "
+                  f"{concept_path.name}(v{new_version:03d}, sha256={self._sha256(concept_path)}) instructions={instruction_path.name}")
+            with self.orchestrator.connection() as db:
+                db.execute("UPDATE story_design_sessions SET concept_path=?,concept_version=?,updated_at=? WHERE session_id=?",
+                           (str(concept_path),new_version,timestamp,session["session_id"]))
+                db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (session["session_id"],"bible_draft",revision,str(path),run_id,"story-architect","rebased",str(draft["path"]),timestamp))
+                db.execute("INSERT INTO story_design_actions(session_id,action,stage,instruction_path,created_at) VALUES(?,?,?,?,?)",
+                           (session["session_id"],"concept_rebase","bible",note,timestamp))
+                db.execute("INSERT INTO story_design_actions(session_id,action,stage,instruction_path,created_at) VALUES(?,?,?,?,?)",
+                           (session["session_id"],"rebase","bible",str(instruction_path),timestamp))
+            session=self._session(session["work_id"],session["session_id"])
+            rebased=self._artifact(session["session_id"],"bible_draft")
+            audit_run_id=self.orchestrator._new_run_id()
+            if self.dummy:
+                body=("# ストーリーバイブル独立監査\n\n- 監査担当: `continuity-reviewer`\n- 生成種別: テスト用ダミー。承認判断に使えない\n\n"
+                      +"\n\n".join(f"## {axis}\n\n根拠: 再接続草案を新正本へ独立照合。\n\n長所: 整合している。\n\n弱点・リスク: 追跡が必要。\n\n改善案: 明示する。\n\n判定: ok" for axis in BIBLE_AUDIT)
+                      +"\n\n## 監査結論\n\n確定可否は利用者承認に委ねる。監査だけでは確定しない。\n")
+            else:
+                header=(f"# ストーリーバイブル独立監査\n\n- 監査担当: `continuity-reviewer`\n- 生成種別: 実Antigravity\n"
+                        f"- アダプター: `{session['adapter']}`\n- 対象草案: 第{revision}版\n- 参照CONCEPT: `{concept_path.name}`（v{new_version:03d}）\n"
+                        f"- 生成実行ID: `{run_id}`\n- 監査実行ID: `{audit_run_id}`\n\n")
+                body=header+self._run_audit(session,"bible",rebased,BIBLE_AUDIT,audit_run_id,directory,"continuity-reviewer",
+                                            extra=self.REBASE_CHECKS,label=f"bible-r{revision:03d}")+"\n"
+            atomic_write(audit_path,body); timestamp=now()
+            with self.orchestrator.connection() as db:
+                db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (session["session_id"],"bible_audit",revision,str(audit_path),audit_run_id,"continuity-reviewer","completed",str(path),timestamp))
+                db.execute("UPDATE story_design_sessions SET status='bible_awaiting_approval',error=NULL,updated_at=? WHERE session_id=?",(timestamp,session["session_id"]))
+        except Exception as error:
+            with self.orchestrator.connection() as db: db.execute("UPDATE story_design_sessions SET status='bible_awaiting_approval',error=?,updated_at=? WHERE session_id=?",(str(error),now(),session["session_id"]))
+            raise
+        return self.status(session["work_id"],session["session_id"])
+
+    def _concept_version(self, concept_path, fallback):
+        match=re.search(r"CONCEPT\.v(\d+)\.md$",Path(concept_path).name)
+        return int(match.group(1)) if match else fallback+1
 
     def revise_bible(self, work_id=None, session_id=None, *, instructions=None):
         """承認待ちのバイブル草案を版付きで改訂し、独立再監査まで行う。承認・確定はしない。"""

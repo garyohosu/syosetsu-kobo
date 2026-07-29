@@ -2,7 +2,7 @@
 
 - 参照元: `novels/prototype-001/READER_PROFILE.v002.md`
 - 版: v002（セッション開始時に固定）
-- セッションID: `concept-169e90deba774338951b29d14b076073`
+- セッションID: `concept-08010bc4c14941b19a3896b3efb45582`
 
 ---
 

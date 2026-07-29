@@ -1,0 +1,48 @@
+{
+  "session_id": "concept-08010bc4c14941b19a3896b3efb45582",
+  "work_id": "prototype-001",
+  "adapter": "agy",
+  "model": "Antigravity既定（--model未指定）",
+  "evaluator_model": "Antigravity既定（--model未指定）",
+  "dummy": false,
+  "generated_at": "2026-07-28T14:02:32.441054+00:00",
+  "status": "awaiting_selection",
+  "reader_profile": "novels/prototype-001/READER_PROFILE.v002.md",
+  "reader_profile_version": 2,
+  "candidate_run_ids": {
+    "C01": "run-20260728T135655.904456Z-5192635f272c",
+    "C02": "run-20260728T135728.519179Z-df901980f93a",
+    "C03": "run-20260728T135803.739143Z-01c97f697fb4",
+    "C04": "run-20260728T135831.550941Z-5daded0f5488",
+    "C05": "run-20260728T135902.537654Z-0fcaf6c74c71"
+  },
+  "evaluation_run_ids": {
+    "C01": "run-20260728T135929.986513Z-ddb59ed209da",
+    "C02": "run-20260728T135957.026327Z-3c72cec2395b",
+    "C03": "run-20260728T140027.714799Z-1978cb74274b",
+    "C04": "run-20260728T140055.695990Z-ee1dd18883c7",
+    "C05": "run-20260728T140116.763150Z-9bdcd34caf10"
+  },
+  "reader_profile_selection": "novels/{work}/READER_PROFILE.vNNN.mdの数値最大版",
+  "source_paths": {
+    "board": ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/editorial-board/index.html",
+    "candidates": [
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c01.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c02.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c03.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c04.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c05.md"
+    ],
+    "evaluations": [
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c01.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c02.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c03.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c04.md",
+      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c05.md"
+    ],
+    "comparison": ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/comparison.md"
+  },
+  "note": "この出版は企画の確定ではない。利用者の明示選択が必要。",
+  "integrity_status": "unverifiable",
+  "integrity_note": "instruction-20260729-01の再検証(2026-07-29)で、このsession_id(concept-08010bc4c14941b19a3896b3efb45582)がプロジェクトの実DB(.kobo/state.db)のconcept_sessionsテーブルに一件も存在しないことが判明した。concept-start()はdummy/agyを問わずセッション開始時に必ずconcept_sessionsへ行を挿入するコードになっており(kobo/concept.py)、DBのconcept_sessionsにはこのsession_idも対応するrunsも一切記録されていない。すなわち、このディレクトリの内容が実際にkobo.cliのConceptManagerパイプラインを通じてagyアダプター経由で生成されたことを、本リポジトリの状態からは検証できない。ディレクトリ名をeditorial-board-v002からeditorial-board-v002-unverifiedへ変更し、novels/prototype-001/editorial-board-v002には検証済みの新しい実セッション(concept-169e90deba774338951b29d14b076073、DBのconcept_sessions/concept_candidates/concept_evaluationsに記録済み)を出版し直した。本ディレクトリは削除せず、調査対象の履歴として保持する。"
+}

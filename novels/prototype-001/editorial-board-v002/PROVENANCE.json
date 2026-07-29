@@ -1,46 +1,46 @@
 {
-  "session_id": "concept-08010bc4c14941b19a3896b3efb45582",
+  "session_id": "concept-169e90deba774338951b29d14b076073",
   "work_id": "prototype-001",
   "adapter": "agy",
   "model": "Antigravity既定（--model未指定）",
   "evaluator_model": "Antigravity既定（--model未指定）",
   "dummy": false,
-  "generated_at": "2026-07-28T14:02:32.441054+00:00",
+  "generated_at": "2026-07-29T01:17:48.241218+00:00",
   "status": "awaiting_selection",
   "reader_profile": "novels/prototype-001/READER_PROFILE.v002.md",
   "reader_profile_version": 2,
   "candidate_run_ids": {
-    "C01": "run-20260728T135655.904456Z-5192635f272c",
-    "C02": "run-20260728T135728.519179Z-df901980f93a",
-    "C03": "run-20260728T135803.739143Z-01c97f697fb4",
-    "C04": "run-20260728T135831.550941Z-5daded0f5488",
-    "C05": "run-20260728T135902.537654Z-0fcaf6c74c71"
+    "C01": "run-20260729T010940.037460Z-e6f75e221202",
+    "C02": "run-20260729T011020.859379Z-38756086ca8f",
+    "C03": "run-20260729T011050.116274Z-2fae918f37f1",
+    "C04": "run-20260729T011118.289542Z-21e8d75f7d1c",
+    "C05": "run-20260729T011153.357728Z-f32184354957"
   },
   "evaluation_run_ids": {
-    "C01": "run-20260728T135929.986513Z-ddb59ed209da",
-    "C02": "run-20260728T135957.026327Z-3c72cec2395b",
-    "C03": "run-20260728T140027.714799Z-1978cb74274b",
-    "C04": "run-20260728T140055.695990Z-ee1dd18883c7",
-    "C05": "run-20260728T140116.763150Z-9bdcd34caf10"
+    "C01": "run-20260729T011219.574806Z-3ad28bf7f703",
+    "C02": "run-20260729T011246.716623Z-b358692449cc",
+    "C03": "run-20260729T011338.908527Z-65652b00617d",
+    "C04": "run-20260729T011421.428371Z-659fdc1becfd",
+    "C05": "run-20260729T011452.050421Z-26893477cdae"
   },
   "reader_profile_selection": "novels/{work}/READER_PROFILE.vNNN.mdの数値最大版",
   "source_paths": {
-    "board": ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/editorial-board/index.html",
+    "board": ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/editorial-board/index.html",
     "candidates": [
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c01.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c02.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c03.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c04.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/candidate-c05.md"
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/candidate-c01.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/candidate-c02.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/candidate-c03.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/candidate-c04.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/candidate-c05.md"
     ],
     "evaluations": [
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c01.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c02.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c03.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c04.md",
-      ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/evaluation-c05.md"
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/evaluation-c01.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/evaluation-c02.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/evaluation-c03.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/evaluation-c04.md",
+      ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/evaluation-c05.md"
     ],
-    "comparison": ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/comparison.md"
+    "comparison": ".kobo/works/prototype-001/concepts/concept-169e90deba774338951b29d14b076073/comparison.md"
   },
   "note": "この出版は企画の確定ではない。利用者の明示選択が必要。"
 }

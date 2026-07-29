@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from pathlib import Path
 
+from .concept import text_quality_problems
 from .orchestrator import KoboError, atomic_write, now, safe_path
 
 
@@ -53,7 +55,7 @@ class StoryDesignManager:
     def start(self, work_id=None):
         work=self._work(work_id); concept,path=self._latest_concept(work["work_id"]); timestamp=now(); session_id=uid("story") ; source=self._handoff_mail(work["work_id"],path)
         with self.orchestrator.connection() as db:
-            try: db.execute("INSERT INTO story_design_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(session_id,work["work_id"],concept["id"],str(path),concept["version"],concept["urs_path"],"bible_generating","dummy" if self.dummy else "gemini",source,None,None,timestamp,timestamp,None))
+            try: db.execute("INSERT INTO story_design_sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(session_id,work["work_id"],concept["id"],str(path),concept["version"],concept["urs_path"],"bible_generating","dummy" if self.dummy else "agy",source,None,None,timestamp,timestamp,None))
             except sqlite3.IntegrityError as error: raise KoboError("この作品には進行中のストーリー設計があります") from error
         return self.resume(work["work_id"],session_id)
 
@@ -82,21 +84,137 @@ class StoryDesignManager:
         if existing: return existing
         directory=self._dir(session); revision=1; path=directory/f"{kind}.r{revision:03d}.md"; run_id=self.orchestrator._new_run_id(); headings=BIBLE_HEADINGS if stage=="bible" else PLOT_HEADINGS
         source=Path(session["concept_path"]) if stage=="bible" else Path(self._document(session["session_id"],"bible")["path"])
-        if self.dummy: text=self._dummy(session,stage)
+        if self.dummy:
+            text=self._dummy(session,stage); self._validate(text,headings,stage)
         else:
-            upstream=source.read_text(encoding="utf-8"); concept=Path(session["concept_path"]).read_text(encoding="utf-8")
-            task=directory/f"task-{kind}.md"; atomic_write(task,f"# {kind}生成\n\n本文を書かず、必須見出し {', '.join(headings)} を使う。確定資料を変更・補完しない。\n\n## 固定CONCEPT\n{concept}\n\n## 直接入力\n{upstream}")
-            agent_id="story-architect" if stage=="bible" else "plotter"; agent=self.orchestrator.agents[agent_id]; refs={"task_path":str(task),"output_path":str(path),"model":self.orchestrator.config.models.get(agent_id,self.orchestrator.config.models.get("gemini",agent.model)),"run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),"mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}; self.orchestrator._adapter(agent).execute(agent,refs,path); text=path.read_text(encoding="utf-8")
-        self._validate(text,headings,stage); atomic_write(path,text); timestamp=now(); agent_id="story-architect" if stage=="bible" else "plotter"
+            text=self._run_draft(session,stage,source,headings,run_id,directory)
+        atomic_write(path,text); timestamp=now(); agent_id="story-architect" if stage=="bible" else "plotter"
         with self.orchestrator.connection() as db: db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(session["session_id"],kind,revision,str(path),run_id,agent_id,"generated",str(source),timestamp))
         return self._artifact(session["session_id"],kind)
+
+    def _draft_prompt(self, session, stage, upstream, headings, feedback=None, include_upstream=False)->str:
+        concept=Path(session["concept_path"]).read_text(encoding="utf-8")
+        label="ストーリーバイブル" if stage=="bible" else "全体プロット"
+        parts=[f"あなたは{label}の設計担当です。確定済みCONCEPTを正本として、{label}草案を作成してください。","",
+               "## 絶対条件",
+               "- **ファイルを作成・保存しない。** 成果物は標準出力へ直接書き出す。",
+               "- 出力はMarkdown本体のみ。前置き、後書き、コードフェンス、報告文、リンクを付けない。",
+               "- 小説の本文は書かない。設計資料だけを書く。",
+               f"- 見出しは次の{len(headings)}個を、この順で過不足なく `## 見出し` として書く: {' / '.join(headings)}",
+               "- 確定済みCONCEPTの内容を変更・否定しない。未確定事項は「仮定・未決事項・リスク」へ書く。",
+               "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。",
+               "- 既存作品の固有名詞、人物設定、台詞、場面、事件を直接流用しない。","",
+               "## 設計方針",
+               "- 内部設計として厳密に確定する。ただし本文で全部説明する前提では書かない。",
+               "- 重要な能力、証拠、規則、秘密には、初出の違和感 → 小規模な使用 → 制約の提示 → 本格的な使用 → 真相開示、の順序を割り当てる。",
+               "- 各設定について、作者側で確定した事実／各人物が知っていること／読者へ既に示したこと／将来明かすこと、の四層を区別して書く。",
+               "- 人物関係と感情を中心に置く。専門知識や制度の説明を主軸にしない。",
+               "- 主人公の目的が全体を動かし、各話の解決が目的へ具体的につながる構造にする。",
+               "- 敵の動機と行動を一貫させ、簡単な証拠を放置させない。",
+               "- 万能な解決手段を作らない。能力には距離、疲労、代償などの制約を与える。","",
+               "## 正本（確定CONCEPT。変更禁止）",concept]
+        if include_upstream:
+            parts += ["","## 直接入力（確定済みバイブル）",upstream]
+        if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
+        return "\n".join(parts)
+
+    def _run_draft(self, session, stage, source, headings, run_id, directory)->str:
+        """草案を実AIで生成する。検証合格した出力だけを正式成果物にする。"""
+        agent_id="story-architect" if stage=="bible" else "plotter"
+        agent=self.orchestrator.agents[agent_id]; limit=max(1,min(agent.max_attempts,3))
+        upstream=source.read_text(encoding="utf-8")
+        attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
+        feedback=None; failures=[]
+        for attempt in range(1,limit+1):
+            raw=attempts/f"{stage}-draft-attempt-{attempt}.md"
+            prompt=self._draft_prompt(session,stage,upstream,headings,feedback,include_upstream=(stage!="bible"))
+            refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get(agent_id,agent.model),
+                  "run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),
+                  "mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
+            self.orchestrator._adapter(agent).execute(agent,refs,raw)
+            text=raw.read_text(encoding="utf-8").strip()
+            lines=text.splitlines()
+            if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            try:
+                self._validate(text,headings,stage)
+                problems=text_quality_problems(text)
+                if problems: raise KoboError("文字品質エラー: "+" / ".join(problems))
+                return text
+            except KoboError as error:
+                feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                atomic_write(attempts/f"{stage}-draft-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"{stage}草案の実AI生成が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    def _run_audit(self, session, stage, draft, axes, run_id, directory, reviewer)->str:
+        """監査担当を実AIで実行する。ダミーへ代替しない（instruction-20260729-02 §11/§12）。"""
+        agent=self.orchestrator.agents[reviewer]; limit=max(1,min(agent.max_attempts,3))
+        draft_text=Path(draft["path"]).read_text(encoding="utf-8")
+        attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
+        feedback=None; failures=[]
+        for attempt in range(1,limit+1):
+            raw=attempts/f"{stage}-audit-attempt-{attempt}.md"
+            prompt=self._audit_prompt(session,stage,draft_text,axes,feedback)
+            refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get(reviewer,agent.model),
+                  "run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),
+                  "mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
+            self.orchestrator._adapter(agent).execute(agent,refs,raw)
+            text=raw.read_text(encoding="utf-8").strip()
+            lines=text.splitlines()
+            if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            try:
+                self._validate_audit(text,axes); return text
+            except KoboError as error:
+                feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                atomic_write(attempts/f"{stage}-audit-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"{stage}の実AI独立監査が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    def _audit_prompt(self, session, stage, draft_text, axes, feedback=None):
+        concept=Path(session["concept_path"]).read_text(encoding="utf-8")
+        parts=[f"あなたは{'ストーリーバイブル' if stage=='bible' else '全体プロット'}の独立監査担当です。草案を固定上流資料へ照合し、監査結果だけを書いてください。","",
+               "## 絶対条件",
+               "- 草案を書き換えない。作品本文も書かない。監査結果だけを出力する。",
+               "- 出力はMarkdown本体のみ。前置き、コードフェンスを付けない。",
+               f"- 次の軸を、この順で過不足なく `## 軸名` として書く: {' / '.join(axes)}",
+               "- 各軸に「根拠:」「長所:」「弱点:」「改善案:」「判定:」の5行を必ず含める。",
+               "- 「根拠:」は草案中の具体的な記述を引用または要約して示す。一般論だけで書かない。",
+               "- 「判定:」は ok / warn / stop のいずれか1語だけを書く。",
+               "- 最後に `## 監査結論` を置き、重大矛盾の有無と、利用者承認前に解消すべき点を3件以内でまとめる。",
+               "- 確定可否は利用者承認に委ねる。監査だけで確定しないと明記する。",
+               "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。","",
+               "## 重点的に確認する点",
+               "- 主人公の目的が全体を動かしているか。各話の解決が目的へ影響するか。",
+               "- 敵の動機と行動が一貫し、故意の関与が過失へ後退していないか。",
+               "- 人物の立場の変化が段階的か。救命直後に全面的な味方になっていないか。",
+               "- 能力・証拠・規則に先行提示と制約があるか。後出しの能力や都合のよい偶然がないか。",
+               "- 人物関係が専門設定より中心にあるか。",
+               "- 固有名、年齢、地理、時系列、制度に矛盾がないか。",
+               "- 既存作品の直接模倣がないか。","",
+               "## 固定CONCEPT（正本）",concept,"",
+               "## 監査対象の草案",draft_text]
+        if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
+        return "\n".join(parts)
+
+    def _validate_audit(self, text, axes):
+        found={m.group(1).strip() for m in re.finditer(r"^##\s+(.+?)\s*$",text,re.MULTILINE)}
+        missing=[axis for axis in axes if axis not in found]
+        if missing: raise KoboError(f"監査の必須軸が不足しています: {missing}")
+        for label in ("根拠","長所","弱点","改善案"):
+            if len(re.findall(rf"^{label}\s*[:：]",text,re.MULTILINE)) < len(axes):
+                raise KoboError(f"各軸に「{label}:」を書いてください")
+        if len(re.findall(r"^判定\s*[:：]\s*(ok|warn|stop)",text,re.MULTILINE|re.IGNORECASE)) < len(axes):
+            raise KoboError("各軸に「判定: ok / warn / stop」を書いてください")
+        problems=text_quality_problems(text)
+        if problems: raise KoboError("文字品質エラー: "+" / ".join(problems))
 
     def _audit(self, session, stage):
         kind=f"{stage}_audit"; existing=self._artifact(session["session_id"],kind)
         if existing:return existing
         draft=self._artifact(session["session_id"],f"{stage}_draft"); directory=self._dir(session); path=directory/f"{kind}.r001.md"; run_id=self.orchestrator._new_run_id(); axes=BIBLE_AUDIT if stage=="bible" else PLOT_AUDIT; reviewer="continuity-reviewer" if stage=="bible" else "plot-reviewer"
-        body=f"# {'ストーリーバイブル' if stage=='bible' else '全体プロット'}独立監査\n\n- 監査担当: `{reviewer}`\n- 生成実行ID: `{draft['run_id']}`\n- 監査実行ID: `{run_id}`\n\n"
-        body+="\n\n".join(f"## {axis}\n\n根拠: 固定上流資料と草案を独立照合。\n\n長所: 構造化され、後工程から参照できる。\n\n弱点・リスク: 未決事項の追跡が必要。\n\n改善案: 確定前に矛盾と仮定を明示する。" for axis in axes)+"\n\n## 監査結論\n\n確定可否は利用者承認に委ねる。監査だけでは確定しない。\n"
+        header=f"# {'ストーリーバイブル' if stage=='bible' else '全体プロット'}独立監査\n\n- 監査担当: `{reviewer}`\n- 生成種別: {'テスト用ダミー。承認判断に使えない' if self.dummy else '実Antigravity'}\n- アダプター: `{session['adapter']}`\n- 生成実行ID: `{draft['run_id']}`\n- 監査実行ID: `{run_id}`\n\n"
+        if self.dummy:
+            body=header+"\n\n".join(f"## {axis}\n\n根拠: 固定上流資料と草案を独立照合。\n\n長所: 構造化され、後工程から参照できる。\n\n弱点・リスク: 未決事項の追跡が必要。\n\n改善案: 確定前に矛盾と仮定を明示する。\n\n判定: ok" for axis in axes)+"\n\n## 監査結論\n\n確定可否は利用者承認に委ねる。監査だけでは確定しない。\n"
+        else:
+            body=header+self._run_audit(session,stage,draft,axes,run_id,directory,reviewer)+"\n"
         atomic_write(path,body); timestamp=now()
         with self.orchestrator.connection() as db: db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(session["session_id"],kind,1,str(path),run_id,reviewer,"completed",draft["path"],timestamp))
         return self._artifact(session["session_id"],kind)
@@ -107,14 +225,18 @@ class StoryDesignManager:
 
     def resume(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id)
+        status=session["status"]
+        if status=="failed":
+            # 失敗したセッションを再開可能にする。確定済みバイブルの有無で工程を判定する。
+            status="plot_generating" if self._document(session["session_id"],"bible") else "bible_generating"
         try:
-            if session["status"] in ("bible_generating","bible_review"):
+            if status in ("bible_generating","bible_review"):
                 self._generate(session,"bible"); self._audit(session,"bible")
                 with self.orchestrator.connection() as db: db.execute("UPDATE story_design_sessions SET status='bible_awaiting_approval',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
                 if session["source_mail_id"]:
                     mail_id=self.orchestrator.mail.send("story-architect","continuity-reviewer",f"バイブル監査完了 session_id={session['session_id']} 状態=承認待ち",parent_message_id=session["source_mail_id"])
                     with self.orchestrator.connection() as db: db.execute("UPDATE story_design_sessions SET bible_mail_id=? WHERE session_id=?",(mail_id,session["session_id"]))
-            elif session["status"] in ("plot_generating","plot_review"):
+            elif status in ("plot_generating","plot_review"):
                 self._generate(session,"plot"); self._audit(session,"plot")
                 with self.orchestrator.connection() as db: db.execute("UPDATE story_design_sessions SET status='plot_awaiting_approval',updated_at=? WHERE session_id=?",(now(),session["session_id"]))
                 if session["bible_mail_id"]:

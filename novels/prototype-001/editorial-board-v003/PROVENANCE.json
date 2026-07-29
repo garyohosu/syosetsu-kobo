@@ -1,0 +1,30 @@
+{
+  "session_id": "concept-83a021b88bae43d183ce6d37cd75e315",
+  "work_id": "prototype-001",
+  "adapter": "agy",
+  "model": "Antigravity既定（--model未指定）",
+  "evaluator_model": "Antigravity既定（--model未指定）",
+  "dummy": false,
+  "generated_at": "2026-07-29T08:57:35.728431+00:00",
+  "status": "final",
+  "reader_profile": "novels/prototype-001/READER_PROFILE.v003.md",
+  "reader_profile_version": 3,
+  "candidate_run_ids": {
+    "C01": "run-20260729T084939.229451Z-3fc72dcffb36"
+  },
+  "evaluation_run_ids": {
+    "C01": "run-20260729T085019.058860Z-3a0ef1c582e0"
+  },
+  "reader_profile_selection": "novels/{work}/READER_PROFILE.vNNN.mdの数値最大版",
+  "source_paths": {
+    "board": ".kobo/works/prototype-001/concepts/concept-83a021b88bae43d183ce6d37cd75e315/editorial-board/index.html",
+    "candidates": [
+      ".kobo/works/prototype-001/concepts/concept-83a021b88bae43d183ce6d37cd75e315/candidate-c01.md"
+    ],
+    "evaluations": [
+      ".kobo/works/prototype-001/concepts/concept-83a021b88bae43d183ce6d37cd75e315/evaluation-c01.md"
+    ],
+    "comparison": ".kobo/works/prototype-001/concepts/concept-83a021b88bae43d183ce6d37cd75e315/comparison.md"
+  },
+  "note": "この出版は企画の確定ではない。利用者の明示選択が必要。"
+}

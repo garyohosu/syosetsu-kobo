@@ -64,6 +64,9 @@ class RecordingAgyAdapter(Adapter):
             fixed = candidate_markdown(ordinal)
             if self.always_contaminate: fixed = fixed.replace("その場の問題には", "その場 of 問題には", 1)
             atomic_write(output_path, fixed); return
+        if "改訂対象の既存案" in prompt:  # 実AIによる候補改訂
+            ordinal = int(re.search(r"企画候補 C(\d+)", prompt).group(1))
+            atomic_write(output_path, candidate_markdown(ordinal, title="改訂後の仮題")); return
         ordinal = int(re.search(r"候補C(\d+)", prompt).group(1))
         if self.always_fail_candidates or self.candidate_failures > 0:
             if not self.always_fail_candidates: self.candidate_failures -= 1
@@ -169,7 +172,9 @@ class ConceptManagerTest(unittest.TestCase):
         work,manager,result=self.real_session()
         selected=manager.action("select","C02",work_id=work); self.assertIsNotNone(selected["selected_candidate_id"])
         final=manager.finalize(work); self.assertEqual(final["version"],1); self.assertIn("c02",final["candidate_id"]); self.assertTrue(Path(final["path"]).is_file())
-        text=Path(final["path"]).read_text(encoding="utf-8"); self.assertIn(result["urs_path"],text); self.assertIn("利用者の明示選択",text)
+        text=Path(final["path"]).read_text(encoding="utf-8")
+        self.assertIn(Path(result["urs_path"]).name,text); self.assertNotIn(str(self.root),text)
+        self.assertIn("利用者の明示選択",text)
 
     def test_hold_and_reject_are_distinct(self):
         work=self.make_work(); manager=ConceptManager(self.orch,dummy=True); manager.start(work); self.assertEqual(manager.action("hold",work_id=work)["status"],"held")
@@ -371,6 +376,45 @@ class ConceptManagerTest(unittest.TestCase):
         work=self.make_work(); manager=ConceptManager(self.orch,dummy=False)
         with self.assertRaisesRegex(KoboError,"ダミーへ代替しません"): manager.start(work)
         self.assertEqual(manager.status(work)["status"],"failed"); self.assertEqual(manager.candidates(work),[])
+
+    def test_real_revision_regenerates_candidate_without_overwriting_original(self):
+        work,manager,_=self.real_session()
+        instructions=self.root/"revision.md"; instructions.write_text("仮題を変える。",encoding="utf-8")
+        before=manager.candidate("C01",work)
+        original_text=Path(before["path"]).read_text(encoding="utf-8")
+        result=manager.action("select","C01",work_id=work)
+        result=manager.action("revise","C01",instruction_path=instructions,work_id=work)
+        self.assertEqual(result["revision"]["revision"],1); self.assertEqual(result["revision"]["attempts"],1)
+        # 原本は一字も変わらない
+        self.assertEqual(Path(before["path"]).read_text(encoding="utf-8"),original_text)
+        after=manager.candidate("C01",work)
+        self.assertEqual(after["revision"],1); self.assertNotEqual(after["path"],after["original_path"])
+        self.assertIn("改訂後の仮題",after["content"]); self.assertNotIn("改訂後の仮題",original_text)
+        self.assertNotEqual(after["revision_run_id"],before["generation_run_id"])
+        prompts=[p for agent_id,p in self.agy.prompts if agent_id=="planner"]
+        self.assertIn("改訂対象の既存案",prompts[-1]); self.assertIn("仮題を変える。",prompts[-1])
+        rows=manager.revisions("C01",work)
+        self.assertEqual(len(rows),1); self.assertEqual(rows[0]["source_run_id"],before["generation_run_id"])
+
+    def test_finalized_concept_uses_revised_candidate_and_records_lineage(self):
+        work,manager,_=self.real_session()
+        instructions=self.root/"revision.md"; instructions.write_text("仮題を変える。",encoding="utf-8")
+        manager.action("select","C01",work_id=work)
+        manager.action("revise","C01",instruction_path=instructions,work_id=work)
+        final=manager.finalize(work)
+        text=Path(final["path"]).read_text(encoding="utf-8")
+        self.assertIn("改訂後の仮題",text)
+        self.assertIn("候補改訂: 第1版",text)
+        self.assertIn("仮題を変える。",text)
+        self.assertNotIn(str(self.root),text)
+
+    def test_dummy_revision_still_records_only(self):
+        """ダミーセッションでは実AI改訂を行わない（従来どおり指示の記録のみ）。"""
+        work=self.make_work(); manager=ConceptManager(self.orch,dummy=True); manager.start(work)
+        instructions=self.root/"revision.md"; instructions.write_text("記録のみ。",encoding="utf-8")
+        with self.assertRaisesRegex(KoboError,"ダミー"):
+            manager.action("revise","C01",instruction_path=instructions,work_id=work)
+        self.assertEqual(manager.revisions(work_id=work),[])
 
     def test_stale_profile_registration_does_not_beat_newer_file(self):
         """一度v001で企画を作った後にv002を置いたら、次のセッションはv002を使う。"""

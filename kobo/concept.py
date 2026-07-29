@@ -120,6 +120,7 @@ class ConceptManager:
             CREATE TABLE IF NOT EXISTS concept_evaluations(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), candidate_id TEXT NOT NULL REFERENCES concept_candidates(candidate_id), path TEXT NOT NULL UNIQUE, evaluation_run_id TEXT NOT NULL UNIQUE, evaluator_id TEXT NOT NULL, recommendation_rank INTEGER, created_at TEXT NOT NULL, UNIQUE(session_id,candidate_id));
             CREATE TABLE IF NOT EXISTS concept_actions(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), action TEXT NOT NULL, candidate_id TEXT, instruction_path TEXT, note TEXT, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS concept_documents(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE REFERENCES concept_sessions(session_id), version INTEGER NOT NULL, path TEXT NOT NULL UNIQUE, candidate_id TEXT NOT NULL, urs_path TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS concept_revisions(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES concept_sessions(session_id), candidate_id TEXT NOT NULL REFERENCES concept_candidates(candidate_id), revision INTEGER NOT NULL, path TEXT NOT NULL UNIQUE, revision_run_id TEXT NOT NULL UNIQUE, source_run_id TEXT NOT NULL, instruction_path TEXT NOT NULL, attempts INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(candidate_id,revision));
             """)
 
     def _work(self, work_id=None): return self.orchestrator.get_work(work_id)
@@ -572,7 +573,72 @@ class ConceptManager:
             if short: candidate_id=short[0]
         with self.orchestrator.connection() as db: row=db.execute("SELECT * FROM concept_candidates WHERE candidate_id=? AND session_id=?",(candidate_id,session["session_id"])).fetchone()
         if not row: raise KoboError("候補が見つかりません")
-        result=dict(row); result["content"]=Path(row["path"]).read_text(encoding="utf-8"); return result
+        result=dict(row); result["content"]=Path(row["path"]).read_text(encoding="utf-8")
+        result["original_path"]=row["path"]; result["revision"]=0; result["revision_run_id"]=None
+        with self.orchestrator.connection() as db:
+            latest=db.execute("SELECT * FROM concept_revisions WHERE candidate_id=? ORDER BY revision DESC LIMIT 1",(candidate_id,)).fetchone()
+        if latest:
+            # 改訂版が正本。原本は削除せずoriginal_pathに残す。
+            result["content"]=Path(latest["path"]).read_text(encoding="utf-8")
+            result["path"]=latest["path"]; result["revision"]=latest["revision"]; result["revision_run_id"]=latest["revision_run_id"]
+        return result
+
+    def revisions(self,candidate_id=None,work_id=None,session_id=None):
+        session=self._session(work_id,session_id)
+        query="SELECT * FROM concept_revisions WHERE session_id=?"; params=[session["session_id"]]
+        if candidate_id:
+            query+=" AND candidate_id=?"; params.append(self.candidate(candidate_id,session["work_id"],session["session_id"])["candidate_id"])
+        with self.orchestrator.connection() as db: return [dict(r) for r in db.execute(query+" ORDER BY revision",params)]
+
+    def _revision_prompt(self,candidate,instructions,feedback=None,repair_source=None)->str:
+        if repair_source: return self._repair_prompt(feedback,repair_source)
+        parts=["あなたは日本語web小説の企画編集者です。既存の企画ラフを、確定した改訂指示に沿って改訂してください。","",
+               "## 絶対条件",
+               "- 小説の本文は書かない。企画ラフだけを書く。",
+               "- 出力はMarkdown本体のみ。前置き、後書き、コードフェンス、説明文を付けない。",
+               f"- 1行目は `# 企画候補 C{candidate['ordinal']:02d}: 仮題` の形式にする。",
+               f"- 見出しは次の9個を、この順で過不足なく `## 見出し` として書く: {' / '.join(REQUIRED_CANDIDATE_HEADINGS)}",
+               "- ログラインは80字以内。第一話のあらすじは500字以上800字以内。",
+               "- 中心人物は3人以内。必ず `- 名前(役割): 説明` の箇条書きで書く。",
+               "- 主人公は `- 項目: 内容` の箇条書きで、性別、年齢、立場、願望、弱点、行動原理、セリフを書く。",
+               "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。","",
+               "## 改訂の方針",
+               "- 改訂指示に明記された確定事項は必ず反映する。",
+               "- 改訂指示と矛盾しない範囲で、既存案の良い部分（人物名、関係、構造）は維持する。",
+               "- 作り直しではなく改訂である。既存案の骨格を大きく捨てない。","",
+               "## 改訂指示（確定事項。最優先）",instructions,"",
+               "## 改訂対象の既存案",candidate["content"]]
+        if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
+        return "\n".join(parts)
+
+    def _revise_candidate(self,session,candidate,instruction_path):
+        """実AIで候補を改訂する。原本を上書きせず新しい改訂版として保存する。"""
+        agent=self.orchestrator.agents["planner"]; limit=max(1,min(agent.max_attempts,3))
+        instructions=Path(instruction_path).read_text(encoding="utf-8").strip()
+        with self.orchestrator.connection() as db:
+            previous=db.execute("SELECT COALESCE(MAX(revision),0) FROM concept_revisions WHERE candidate_id=?",(candidate["candidate_id"],)).fetchone()[0]
+        revision=previous+1; run_id=self.orchestrator._new_run_id()
+        base=Path(candidate["original_path"]); path=base.with_name(f"{base.stem}.rev{revision:02d}.md")
+        if path.exists(): raise KoboError("既存改訂版の上書きを拒否しました")
+        attempts_dir=base.parent/"attempts"; attempts_dir.mkdir(parents=True,exist_ok=True)
+        feedback=None; repair_source=None; failures=[]
+        for attempt in range(1,limit+1):
+            raw_path=attempts_dir/f"c{candidate['ordinal']:02d}-rev{revision:02d}-attempt-{attempt}.md"
+            prompt=self._revision_prompt(candidate,instructions,feedback,repair_source)
+            try:
+                raw=self._run_agent("planner",prompt,raw_path,run_id,session)
+                text=self._normalize_candidate(session,candidate["ordinal"],run_id,raw)
+                self._validate_candidate(text)
+                atomic_write(path,text); timestamp=now()
+                with self.orchestrator.connection() as db:
+                    db.execute("INSERT INTO concept_revisions(session_id,candidate_id,revision,path,revision_run_id,source_run_id,instruction_path,attempts,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                               (session["session_id"],candidate["candidate_id"],revision,str(path),run_id,candidate["generation_run_id"],str(instruction_path),attempt,timestamp))
+                return {"path":str(path),"revision":revision,"revision_run_id":run_id,"attempts":attempt}
+            except KoboError as error:
+                feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                repair_source=raw_path.read_text(encoding="utf-8") if (QUALITY_ERROR in feedback and raw_path.is_file()) else None
+                atomic_write(attempts_dir/f"c{candidate['ordinal']:02d}-rev{revision:02d}-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"C{candidate['ordinal']:02d}の実AI改訂が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
 
     def comparisons(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id)
@@ -681,13 +747,19 @@ class ConceptManager:
             if path.suffix.lower() not in (".md",".json"): raise KoboError("修正指示はUTF-8 MarkdownまたはJSONにしてください")
             path.read_text(encoding="utf-8")
         if action=="revise" and not path: raise KoboError("修正指示ファイルが必要です")
+        revised=None
+        if action=="revise" and not self.dummy:
+            # ダミーでは従来どおり指示の記録のみ。実AIセッションでは候補を実際に改訂する。
+            revised=self._revise_candidate(session,self.candidate(candidate_id,session["work_id"],session["session_id"]),path)
         timestamp=now()
         with self.orchestrator.connection() as db:
             db.execute("INSERT INTO concept_actions(session_id,action,candidate_id,instruction_path,note,created_at) VALUES(?,?,?,?,?,?)",(session["session_id"],action,candidate_id,str(path) if path else None,note,timestamp))
             state={"select":"selected","hold":"held","reject_all":"rejected","revise":"selected","regenerate":"superseded"}[action]
             db.execute("UPDATE concept_sessions SET status=?,updated_at=? WHERE session_id=?",(state,timestamp,session["session_id"]))
         if action=="regenerate": return self.start(session["work_id"],session["candidate_count"])
-        return self.status(session["work_id"],session["session_id"])
+        result=self.status(session["work_id"],session["session_id"])
+        if revised: result["revision"]=revised
+        return result
 
     def history(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id)
@@ -701,7 +773,9 @@ class ConceptManager:
     def _render(self,session,version,final):
         action,candidate=self._selected(session); revision="なし"
         if action["instruction_path"]: revision=Path(action["instruction_path"]).read_text(encoding="utf-8")
-        return f"# 作品企画（CONCEPT）\n\n- 版: {version}\n- 状態: {'確定' if final else 'プレビュー'}\n- work_id: `{session['work_id']}`\n- 参照URS: `{session['urs_path']}`（v{session['urs_version']:03d}、固定）\n- 選択候補: `{candidate['candidate_id']}`\n- 選択根拠: 利用者の明示選択。AI推奨のみでは確定していない。\n\n## 作品ブリーフ\n\n{candidate['title']}を基礎とする。\n\n{candidate['content']}\n\n## 利用者の修正指示\n\n{revision}\n\n## 必須・禁止条件\n\n確定URSの必須・禁止条件を変更しない。\n\n## 仮決定・未決事項・リスク\n\n候補成果物に記載された仮定とリスクを次工程で検証する。\n\n## 次工程入力\n\n参照URSと本CONCEPTのパスを入力とし、未実装の作品設計工程へ引き渡す。本文生成はまだ実行しない。\n"
+        lineage=(f"- 候補改訂: 第{candidate['revision']}版（改訂実行ID `{candidate['revision_run_id']}`、原本 `{self._relative(candidate['original_path'])}`）\n"
+                 if candidate.get("revision") else "- 候補改訂: なし（原本をそのまま採用）\n")
+        return f"# 作品企画（CONCEPT）\n\n- 版: {version}\n- 状態: {'確定' if final else 'プレビュー'}\n- work_id: `{session['work_id']}`\n- 参照読者プロファイル: `{self._relative(session['urs_path'])}`（v{session['urs_version']:03d}、固定）\n- 生成種別: {DUMMY_PROVENANCE if self._is_dummy_session(session) else REAL_PROVENANCE}\n- アダプター: `{session['adapter']}`\n- 企画セッション: `{session['session_id']}`\n- 選択候補: `{candidate['candidate_id']}`\n- 候補生成実行ID: `{candidate['generation_run_id']}`\n{lineage}- 選択根拠: 利用者の明示選択。AI推奨のみでは確定していない。\n\n## 作品ブリーフ\n\n{candidate['title']}を基礎とする。\n\n{candidate['content']}\n\n## 利用者の修正指示\n\n{revision}\n\n## 必須・禁止条件\n\n確定URSの必須・禁止条件を変更しない。\n\n## 仮決定・未決事項・リスク\n\n候補成果物に記載された仮定とリスクを次工程で検証する。\n\n## 次工程入力\n\n参照URSと本CONCEPTのパスを入力とし、未実装の作品設計工程へ引き渡す。本文生成はまだ実行しない。\n"
 
     def preview(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id); self._reject_dummy(session,"プレビューを生成")

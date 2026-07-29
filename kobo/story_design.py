@@ -263,6 +263,14 @@ class StoryDesignManager:
         "CONCEPT.v001.mdの確定事項を変更していないか。",
     )
 
+    @staticmethod
+    def _extract_checks(instruction_path):
+        """改訂指示の「再監査の重点項目」節を、再監査プロンプトの確認項目として取り込む。"""
+        text=Path(instruction_path).read_text(encoding="utf-8")
+        match=re.search(r"^#+\s*再監査の重点項目\s*$(.*?)(?=^#+\s|\Z)",text,re.MULTILINE|re.DOTALL)
+        if not match: return ()
+        return tuple(line.strip()[2:].strip() for line in match.group(1).splitlines() if line.strip().startswith("- "))
+
     def _bible_revision_prompt(self, session, draft_text, audit_text, instructions, headings, feedback=None, preserve=())->str:
         concept=Path(session["concept_path"]).read_text(encoding="utf-8")
         parts=["あなたはストーリーバイブルの設計担当です。既存の草案を、確定した改訂指示に沿って改訂してください。","",
@@ -308,7 +316,7 @@ class StoryDesignManager:
             "## 修復対象（この全文を直して返す）",previous,
         ])
 
-    def _run_bible_revision(self, session, draft, audit, instruction_path, run_id, directory, headings, preserve=())->str:
+    def _run_bible_revision(self, session, draft, audit, instruction_path, run_id, directory, headings, preserve=(), revision=None)->str:
         agent=self.orchestrator.agents["story-architect"]; limit=max(1,min(agent.max_attempts,3))
         draft_text=Path(draft["path"]).read_text(encoding="utf-8")
         audit_text=Path(audit["path"]).read_text(encoding="utf-8")
@@ -316,7 +324,7 @@ class StoryDesignManager:
         attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
         feedback=None; failures=[]; repair_source=None
         for attempt in range(1,limit+1):
-            raw=attempts/f"bible-revise-attempt-{attempt}.md"
+            raw=attempts/f"bible-r{revision:03d}-revise-attempt-{attempt}.md" if revision else attempts/f"bible-revise-attempt-{attempt}.md"
             # 文字混入だけが原因なら、作り直させず前回出力の修復を求める。
             prompt=(self._quality_repair_prompt(feedback,repair_source) if repair_source
                     else self._bible_revision_prompt(session,draft_text,audit_text,instructions,headings,feedback,preserve))
@@ -383,7 +391,7 @@ class StoryDesignManager:
         if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
         return "\n".join(parts)
 
-    def _run_bible_rebase(self, session, concept_path, draft, audit, instruction_path, run_id, directory, headings)->str:
+    def _run_bible_rebase(self, session, concept_path, draft, audit, instruction_path, run_id, directory, headings, revision=None)->str:
         agent=self.orchestrator.agents["story-architect"]; limit=max(1,min(agent.max_attempts,3))
         concept_text=Path(concept_path).read_text(encoding="utf-8")
         draft_text=Path(draft["path"]).read_text(encoding="utf-8")
@@ -392,7 +400,7 @@ class StoryDesignManager:
         attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
         feedback=None; failures=[]; repair_source=None
         for attempt in range(1,limit+1):
-            raw=attempts/f"bible-rebase-attempt-{attempt}.md"
+            raw=attempts/f"bible-r{revision:03d}-rebase-attempt-{attempt}.md" if revision else attempts/f"bible-rebase-attempt-{attempt}.md"
             prompt=(self._quality_repair_prompt(feedback,repair_source) if repair_source
                     else self._rebase_prompt(session,concept_text,draft_text,audit_text,instructions,headings,feedback))
             refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get("story-architect",agent.model),
@@ -440,7 +448,7 @@ class StoryDesignManager:
             if self.dummy:
                 text=self._dummy(session,"bible"); self._validate(text,BIBLE_HEADINGS,"bible")
             else:
-                text=self._run_bible_rebase(session,concept_path,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS)
+                text=self._run_bible_rebase(session,concept_path,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS,revision)
             atomic_write(path,text); timestamp=now()
             note=(f"concept_rebase: {old_path.name}(v{old_version:03d}, sha256={self._sha256(old_path)}) -> "
                   f"{concept_path.name}(v{new_version:03d}, sha256={self._sha256(concept_path)}) instructions={instruction_path.name}")
@@ -500,7 +508,7 @@ class StoryDesignManager:
             if self.dummy:
                 text=self._dummy(session,"bible"); self._validate(text,BIBLE_HEADINGS,"bible")
             else:
-                text=self._run_bible_revision(session,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS,preserve)
+                text=self._run_bible_revision(session,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS,preserve,revision)
             atomic_write(path,text); timestamp=now()
             with self.orchestrator.connection() as db:
                 db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -517,8 +525,9 @@ class StoryDesignManager:
             else:
                 header=(f"# ストーリーバイブル独立監査\n\n- 監査担当: `continuity-reviewer`\n- 生成種別: 実Antigravity\n"
                         f"- アダプター: `{session['adapter']}`\n- 対象草案: 第{revision}版\n- 生成実行ID: `{run_id}`\n- 監査実行ID: `{audit_run_id}`\n\n")
+                checks=self._extract_checks(instruction_path) or self.REAUDIT_CHECKS
                 body=header+self._run_audit(session,"bible",revised,BIBLE_AUDIT,audit_run_id,directory,"continuity-reviewer",
-                                            extra=self.REAUDIT_CHECKS,label=f"bible-r{revision:03d}")+"\n"
+                                            extra=checks,label=f"bible-r{revision:03d}")+"\n"
             atomic_write(audit_path,body); timestamp=now()
             with self.orchestrator.connection() as db:
                 db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",

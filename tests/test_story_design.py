@@ -142,6 +142,18 @@ class StoryDesignManagerTest(unittest.TestCase):
         prompt=[p for agent_id,p in self.orch.adapters["agy"].prompts if agent_id=="story-architect"][-1]
         self.assertIn("変更してはいけない見出し",prompt)
 
+    def test_bible_revision_attempts_are_scoped_per_revision(self):
+        """後の改訂が前の版のraw attemptを上書きしない。"""
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        attempts=Path(self.artifacts(session,"bible_draft")[0]["path"]).parent/"attempts"
+        first=sorted(p.name for p in attempts.glob("bible-r*-revise-attempt-*.md"))
+        self.assertEqual(first,["bible-r002-revise-attempt-1.md"])
+        manager.revise_bible(self.work,session,instructions=instructions)
+        second=sorted(p.name for p in attempts.glob("bible-r*-revise-attempt-*.md"))
+        self.assertEqual(second,["bible-r002-revise-attempt-1.md","bible-r003-revise-attempt-1.md"])
+
     def rebase_inputs(self):
         concept=self.root/"novels"/self.work/"CONCEPT.v002.md"
         concept.parent.mkdir(parents=True,exist_ok=True)

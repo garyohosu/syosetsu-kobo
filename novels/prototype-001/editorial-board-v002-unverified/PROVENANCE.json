@@ -43,6 +43,32 @@
     "comparison": ".kobo/works/prototype-001/concepts/concept-08010bc4c14941b19a3896b3efb45582/comparison.md"
   },
   "note": "この出版は企画の確定ではない。利用者の明示選択が必要。",
-  "integrity_status": "unverifiable",
-  "integrity_note": "instruction-20260729-01の再検証(2026-07-29)で、このsession_id(concept-08010bc4c14941b19a3896b3efb45582)がプロジェクトの実DB(.kobo/state.db)のconcept_sessionsテーブルに一件も存在しないことが判明した。concept-start()はdummy/agyを問わずセッション開始時に必ずconcept_sessionsへ行を挿入するコードになっており(kobo/concept.py)、DBのconcept_sessionsにはこのsession_idも対応するrunsも一切記録されていない。すなわち、このディレクトリの内容が実際にkobo.cliのConceptManagerパイプラインを通じてagyアダプター経由で生成されたことを、本リポジトリの状態からは検証できない。ディレクトリ名をeditorial-board-v002からeditorial-board-v002-unverifiedへ変更し、novels/prototype-001/editorial-board-v002には検証済みの新しい実セッション(concept-169e90deba774338951b29d14b076073、DBのconcept_sessions/concept_candidates/concept_evaluationsに記録済み)を出版し直した。本ディレクトリは削除せず、調査対象の履歴として保持する。"
+  "integrity_status": "verification_retracted",
+  "integrity_note": "先行する integrity_status: \"unverifiable\" の判定を撤回する。あの判定は、Git非追跡でマシン固有の .kobo/state.db を、生成を実行したのとは別の作業環境から照合したことによる誤判定だった。生成を実行したマシンでは、このディレクトリの session_id、候補5件の generation_run_id、候補タイトル、および .kobo/works/.../attempts/ に残る生の出力が、すべて concept_sessions / concept_candidates の記録と一致することを確認した。",
+  "integrity_retraction": {
+    "retracted_at": "2026-07-29",
+    "retracted_status": "unverifiable",
+    "reason": "マシン固有のローカルDBとの不一致を、生成が行われなかった証拠として扱ったため。",
+    "evidence_on_generating_machine": {
+      "concept_sessions": "session_id が adapter=agy, urs_version=2, status=awaiting_selection として存在する",
+      "candidate_run_ids": "PROVENANCE の5件すべてが concept_candidates.generation_run_id と一致する",
+      "candidate_titles": "DBのタイトルと出版物のタイトルが一致する",
+      "raw_attempts": ".kobo/works/prototype-001/concepts/<session_id>/attempts/ に生成時の生出力が残っている",
+      "state_db_mtime": "2026-07-28T23:01:54+09:00。旧判定が引用した16:55:16とは異なる"
+    },
+    "retracted_claims": [
+      "session_id がDBに存在しないため生成経路を検証できない、という結論",
+      "runs テーブル総行数0件を真正性の証拠とした記述。ConceptManager は企画生成 run を runs テーブルへ保存せず、concept_candidates.generation_run_id および concept_evaluations.evaluation_run_id へ保存するため、runs の件数は企画生成の真正性を示さない",
+      "state_db の更新時刻を生成時刻と比較して不正と判断した記述",
+      "本ディレクトリを実Antigravity生成ではない可能性が高いと扱った記述",
+      "どのマシンでも state.db と照合すれば真正性を確認できる、という運用方針"
+    ],
+    "retained_general_points": [
+      "Git追跡成果物だけでは、実際に外部モデルが呼び出されたことを完全には証明できない",
+      "ローカルDBとの照合は、同じ作業環境内での整合性確認には使える",
+      "任意の別マシンのローカルDBとの不一致を、生成されなかった証拠として使ってはいけない"
+    ],
+    "scope": "この撤回は真正性判定に限る。現在の novels/prototype-001/editorial-board-v002 と、そこから選択済みの C01 は据え置く。旧v002と現v002の優劣を再判定するものではない。",
+    "directory_name_note": "ディレクトリ名 editorial-board-v002-unverified は、大規模な git mv を避けるため今回は変更していない。名称は撤回前の判定の名残であり、現在の判定を表さない。"
+  }
 }

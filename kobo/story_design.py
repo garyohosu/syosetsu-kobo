@@ -145,15 +145,16 @@ class StoryDesignManager:
                 atomic_write(attempts/f"{stage}-draft-attempt-{attempt}.error.txt",f"{error}\n")
         raise KoboError(f"{stage}草案の実AI生成が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
 
-    def _run_audit(self, session, stage, draft, axes, run_id, directory, reviewer)->str:
+    def _run_audit(self, session, stage, draft, axes, run_id, directory, reviewer, *, extra=None, label=None)->str:
         """監査担当を実AIで実行する。ダミーへ代替しない（instruction-20260729-02 §11/§12）。"""
         agent=self.orchestrator.agents[reviewer]; limit=max(1,min(agent.max_attempts,3))
         draft_text=Path(draft["path"]).read_text(encoding="utf-8")
         attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
+        prefix=label or stage
         feedback=None; failures=[]
         for attempt in range(1,limit+1):
-            raw=attempts/f"{stage}-audit-attempt-{attempt}.md"
-            prompt=self._audit_prompt(session,stage,draft_text,axes,feedback)
+            raw=attempts/f"{prefix}-audit-attempt-{attempt}.md"
+            prompt=self._audit_prompt(session,stage,draft_text,axes,feedback,extra)
             refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get(reviewer,agent.model),
                   "run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),
                   "mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
@@ -168,7 +169,7 @@ class StoryDesignManager:
                 atomic_write(attempts/f"{stage}-audit-attempt-{attempt}.error.txt",f"{error}\n")
         raise KoboError(f"{stage}の実AI独立監査が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
 
-    def _audit_prompt(self, session, stage, draft_text, axes, feedback=None):
+    def _audit_prompt(self, session, stage, draft_text, axes, feedback=None, extra=None):
         concept=Path(session["concept_path"]).read_text(encoding="utf-8")
         parts=[f"あなたは{'ストーリーバイブル' if stage=='bible' else '全体プロット'}の独立監査担当です。草案を固定上流資料へ照合し、監査結果だけを書いてください。","",
                "## 絶対条件",
@@ -222,6 +223,139 @@ class StoryDesignManager:
     def _document(self, session_id, kind):
         with self.orchestrator.connection() as db: row=db.execute("SELECT * FROM story_design_documents WHERE session_id=? AND kind=?",(session_id,kind)).fetchone()
         return row
+
+    REAUDIT_CHECKS = (
+        "ギルベルトが命令違反を認識した上で葛藤しているか。",
+        "救命直後に主人公を全面信用していないか。",
+        "「ただのスープ」が都合のよい法的解決になっていないか。",
+        "黒猫の名前が全箇所で「ミルラ」に統一されているか。「ルナ」が残っていないか。",
+        "刺客の連続襲撃が連載の基本構造になっていないか。",
+        "調合、採取、事件解決、薬草小屋の発展が通常回の中心にあるか。",
+        "敵の妨害が政治、流通、評判、証拠隠蔽へ分散されているか。",
+        "CONCEPT.v001.mdの確定事項を変更していないか。",
+    )
+
+    def _bible_revision_prompt(self, session, draft_text, audit_text, instructions, headings, feedback=None)->str:
+        concept=Path(session["concept_path"]).read_text(encoding="utf-8")
+        parts=["あなたはストーリーバイブルの設計担当です。既存の草案を、確定した改訂指示に沿って改訂してください。","",
+               "## 絶対条件",
+               "- **ファイルを作成・保存しない。** 成果物は標準出力へ直接書き出す。",
+               "- 出力はMarkdown本体のみ。前置き、後書き、コードフェンス、報告文を付けない。",
+               "- 小説の本文は書かない。設計資料だけを書く。",
+               f"- 見出しは次の{len(headings)}個を、この順で過不足なく `## 見出し` として書く: {' / '.join(headings)}",
+               "- 確定済みCONCEPTの確定事項を変更・否定しない。",
+               "- 改訂指示に書かれた3点は必ず反映する。",
+               "- 作り直しではなく改訂である。指示された箇所以外の設計を不必要に作り替えない。",
+               "- 日本語本文へハングル、置換文字、制御文字を混入させない。日本語の語の間へ英語の機能語を挟まない。",
+               "- **日本語の助詞「の」を英単語 of で置き換えない。**「瀕死 of 重傷」ではなく「瀕死の重傷」と書く。同様に the、and、in なども日本語の語の間へ挟まない。",
+               "- 既存作品の固有名詞、人物設定、台詞、場面、事件を直接流用しない。","",
+               "## 改訂指示（確定事項。最優先）",instructions,"",
+               "## 正本（確定CONCEPT。変更禁止）",concept,"",
+               "## 改訂対象の草案（r001）",draft_text,"",
+               "## 前回の独立監査結果（この指摘を踏まえて直す）",audit_text]
+        if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
+        return "\n".join(parts)
+
+    def _quality_repair_prompt(self, problems, previous)->str:
+        """文字混入だけを直させる。内容・人物・構造は変更させない。"""
+        return "\n".join([
+            "次のMarkdownは、日本語本文へ不正な文字が混入しているため不合格です。",
+            "",
+            "## 検出箇所",problems,
+            "",
+            "## 修復の指示",
+            "- **ファイルを作成・保存しない。** 修復後の全文を標準出力へ書き出す。",
+            "- 設計内容、登場人物、構造、見出し、順序を一切変更しない。",
+            "- 検出された混入文字だけを、文脈に合う自然な日本語へ直す。",
+            "- 特に、日本語の助詞「の」を英単語 of へ置き換えている箇所をすべて「の」へ戻す。",
+            "  例: 「瀕死 of 重傷」→「瀕死の重傷」、「森 of 小屋」→「森の小屋」。",
+            "- 新しい設定や表現を足さない。",
+            "- 出力はMarkdown本体のみ。前置き、コードフェンス、説明を付けない。",
+            "",
+            "## 修復対象（この全文を直して返す）",previous,
+        ])
+
+    def _run_bible_revision(self, session, draft, audit, instruction_path, run_id, directory, headings)->str:
+        agent=self.orchestrator.agents["story-architect"]; limit=max(1,min(agent.max_attempts,3))
+        draft_text=Path(draft["path"]).read_text(encoding="utf-8")
+        audit_text=Path(audit["path"]).read_text(encoding="utf-8")
+        instructions=Path(instruction_path).read_text(encoding="utf-8").strip()
+        attempts=directory/"attempts"; attempts.mkdir(parents=True,exist_ok=True)
+        feedback=None; failures=[]; repair_source=None
+        for attempt in range(1,limit+1):
+            raw=attempts/f"bible-revise-attempt-{attempt}.md"
+            # 文字混入だけが原因なら、作り直させず前回出力の修復を求める。
+            prompt=(self._quality_repair_prompt(feedback,repair_source) if repair_source
+                    else self._bible_revision_prompt(session,draft_text,audit_text,instructions,headings,feedback))
+            refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get("story-architect",agent.model),
+                  "run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),
+                  "mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
+            self.orchestrator._adapter(agent).execute(agent,refs,raw)
+            text=raw.read_text(encoding="utf-8").strip()
+            lines=text.splitlines()
+            if len(lines)>=2 and lines[0].startswith("```") and lines[-1].strip()=="```": text="\n".join(lines[1:-1]).strip()
+            try:
+                self._validate(text,headings,"bible")
+                problems=text_quality_problems(text)
+                if problems: raise KoboError("文字品質エラー: "+" / ".join(problems))
+                return text
+            except KoboError as error:
+                feedback=str(error); failures.append(f"attempt {attempt}: {error}")
+                # 見出し欠落など構造的な失敗は作り直し、文字混入は修復パスへ切り替える。
+                repair_source=text if ("文字品質エラー" in feedback and text) else None
+                atomic_write(attempts/f"bible-revise-attempt-{attempt}.error.txt",f"{error}\n")
+        raise KoboError(f"バイブル改訂の実AI生成が{limit}回とも検証に失敗しました（ダミーへ代替しません）: "+" / ".join(failures))
+
+    def revise_bible(self, work_id=None, session_id=None, *, instructions=None):
+        """承認待ちのバイブル草案を版付きで改訂し、独立再監査まで行う。承認・確定はしない。"""
+        session=self._session(work_id,session_id)
+        # 改訂が途中で失敗したセッションは、成果物を何も確定していないため再試行を許す。
+        retryable=session["status"]=="failed" and self._artifact(session["session_id"],"bible_draft") and self._artifact(session["session_id"],"bible_audit") and not self._document(session["session_id"],"bible")
+        if session["status"]!="bible_awaiting_approval" and not retryable:
+            raise KoboError("承認待ちのバイブルだけを改訂できます")
+        if not instructions: raise KoboError("改訂指示ファイルが必要です")
+        instruction_path=safe_path(self.orchestrator.config.root,instructions,must_exist=True)
+        if instruction_path.suffix.lower() not in (".md",".json"): raise KoboError("改訂指示はUTF-8 MarkdownまたはJSONにしてください")
+        draft=self._artifact(session["session_id"],"bible_draft"); audit=self._artifact(session["session_id"],"bible_audit")
+        if not draft or not audit: raise KoboError("改訂対象の草案と監査がそろっていません")
+        directory=self._dir(session); revision=draft["revision"]+1
+        path=directory/f"bible_draft.r{revision:03d}.md"; audit_path=directory/f"bible_audit.r{revision:03d}.md"
+        if path.exists() or audit_path.exists(): raise KoboError("既存改訂版の上書きを拒否しました")
+        try:
+            run_id=self.orchestrator._new_run_id()
+            if self.dummy:
+                text=self._dummy(session,"bible"); self._validate(text,BIBLE_HEADINGS,"bible")
+            else:
+                text=self._run_bible_revision(session,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS)
+            atomic_write(path,text); timestamp=now()
+            with self.orchestrator.connection() as db:
+                db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (session["session_id"],"bible_draft",revision,str(path),run_id,"story-architect","revised",str(draft["path"]),timestamp))
+                db.execute("INSERT INTO story_design_actions(session_id,action,stage,instruction_path,created_at) VALUES(?,?,?,?,?)",
+                           (session["session_id"],"revise","bible",str(instruction_path),timestamp))
+            revised=self._artifact(session["session_id"],"bible_draft")
+            audit_run_id=self.orchestrator._new_run_id()
+            if self.dummy:
+                body=(f"# ストーリーバイブル独立監査\n\n- 監査担当: `continuity-reviewer`\n- 生成種別: テスト用ダミー。承認判断に使えない\n"
+                      f"- アダプター: `{session['adapter']}`\n- 生成実行ID: `{run_id}`\n- 監査実行ID: `{audit_run_id}`\n\n"
+                      +"\n\n".join(f"## {axis}\n\n根拠: 改訂草案と固定上流資料を独立照合。\n\n長所: 指摘が反映されている。\n\n弱点・リスク: 未決事項の追跡が必要。\n\n改善案: 確定前に仮定を明示する。\n\n判定: ok" for axis in BIBLE_AUDIT)
+                      +"\n\n## 監査結論\n\n確定可否は利用者承認に委ねる。監査だけでは確定しない。\n")
+            else:
+                header=(f"# ストーリーバイブル独立監査\n\n- 監査担当: `continuity-reviewer`\n- 生成種別: 実Antigravity\n"
+                        f"- アダプター: `{session['adapter']}`\n- 対象草案: 第{revision}版\n- 生成実行ID: `{run_id}`\n- 監査実行ID: `{audit_run_id}`\n\n")
+                body=header+self._run_audit(session,"bible",revised,BIBLE_AUDIT,audit_run_id,directory,"continuity-reviewer",
+                                            extra=self.REAUDIT_CHECKS,label=f"bible-r{revision:03d}")+"\n"
+            atomic_write(audit_path,body); timestamp=now()
+            with self.orchestrator.connection() as db:
+                db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                           (session["session_id"],"bible_audit",revision,str(audit_path),audit_run_id,"continuity-reviewer","completed",str(path),timestamp))
+                # 承認はしない。再び利用者承認待ちへ戻す。
+                db.execute("UPDATE story_design_sessions SET status='bible_awaiting_approval',error=NULL,updated_at=? WHERE session_id=?",(timestamp,session["session_id"]))
+        except Exception as error:
+            # r002を保存していないので、承認待ちへ戻して再試行できる状態を保つ。
+            with self.orchestrator.connection() as db: db.execute("UPDATE story_design_sessions SET status='bible_awaiting_approval',error=?,updated_at=? WHERE session_id=?",(str(error),now(),session["session_id"]))
+            raise
+        return self.status(session["work_id"],session["session_id"])
 
     def resume(self,work_id=None,session_id=None):
         session=self._session(work_id,session_id)

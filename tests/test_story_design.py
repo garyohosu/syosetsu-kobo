@@ -14,7 +14,7 @@ from tests.test_orchestrator import definition
 class StoryDesignManagerTest(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name); agents=self.root/"agents"; agents.mkdir()
-        specs=(("urs-maker","dummy","planner"),("planner","agy","story-architect"),("concept-reviewer","agy","planner"),("story-architect","gemini","continuity-reviewer"),("continuity-reviewer","dummy","story-architect"),("plotter","gemini","plot-reviewer"),("plot-reviewer","dummy","plotter"),("scene-planner","gemini","writer"),("writer","gemini","critic"),("critic","dummy",None))
+        specs=(("urs-maker","dummy","planner"),("planner","agy","story-architect"),("concept-reviewer","agy","planner"),("story-architect","agy","continuity-reviewer"),("continuity-reviewer","agy","story-architect"),("plotter","gemini","plot-reviewer"),("plot-reviewer","dummy","plotter"),("scene-planner","gemini","writer"),("writer","gemini","critic"),("critic","dummy",None))
         for agent_id,adapter,next_agent in specs: (agents/f"{agent_id}.md").write_text(definition(agent_id,adapter,next_agent,["test"]),encoding="utf-8")
         config=self.root/"kobo.json"; config.write_text(json.dumps({"store":".state","state_db":".state/state.db","mail_db":".state/mail.db","agents_dir":"agents","first_agent":"urs-maker","commands":{"dummy":["dummy"],"gemini":["gemini"]}}),encoding="utf-8")
         self.orch=Orchestrator(Config.load(config),adapters={"agy":RecordingAgyAdapter()}); self.work="story-design"; self.orch.create_work(self.work,"架空作品",first_agent="urs-maker")
@@ -23,6 +23,116 @@ class StoryDesignManagerTest(unittest.TestCase):
         self.manager=StoryDesignManager(self.orch,dummy=True); self.started=self.manager.start(self.work)
 
     def tearDown(self): self.temp.cleanup()
+
+    def real_bible(self):
+        """実AI相当（adapter=agy）のバイブルセッション。改訂経路の検証に使う。"""
+        with self.orch.connection() as db:
+            db.execute("UPDATE story_design_sessions SET status='superseded' WHERE work_id=?",(self.work,))
+        manager=StoryDesignManager(self.orch,dummy=False)
+        started=manager.start(self.work)
+        instructions=self.root/"BIBLE_REVISION.v001.md"
+        instructions.write_text("## 修正1\n\n改訂指示。黒猫の名前をミルラにする。",encoding="utf-8")
+        return manager,started,instructions
+
+    def artifacts(self,session_id,kind):
+        with self.orch.connection() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM story_design_artifacts WHERE session_id=? AND kind=? ORDER BY revision",(session_id,kind))]
+
+    def test_bible_revision_only_from_awaiting_approval(self):
+        manager,started,instructions=self.real_bible()
+        self.assertEqual(started["status"],"bible_awaiting_approval")
+        session=started["session_id"]
+        manager.approve("bible",self.work,session); manager.finalize_bible(self.work,session)
+        with self.assertRaisesRegex(KoboError,"承認待ち"):
+            manager.revise_bible(self.work,session,instructions=instructions)
+
+    def test_bible_revision_requires_instruction_file(self):
+        manager,started,_=self.real_bible()
+        with self.assertRaisesRegex(KoboError,"改訂指示ファイル"):
+            manager.revise_bible(self.work,started["session_id"])
+        with self.assertRaises(KoboError):
+            manager.revise_bible(self.work,started["session_id"],instructions="../outside.md")
+
+    def test_bible_revision_keeps_r001_and_writes_r002(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        first=self.artifacts(session,"bible_draft")[0]
+        first_text=Path(first["path"]).read_text(encoding="utf-8")
+        first_audit=self.artifacts(session,"bible_audit")[0]
+        first_audit_text=Path(first_audit["path"]).read_text(encoding="utf-8")
+        result=manager.revise_bible(self.work,session,instructions=instructions)
+        drafts=self.artifacts(session,"bible_draft"); audits=self.artifacts(session,"bible_audit")
+        self.assertEqual([d["revision"] for d in drafts],[1,2])
+        self.assertEqual([a["revision"] for a in audits],[1,2])
+        # r001は内容もパスも保持される
+        self.assertEqual(Path(first["path"]).read_text(encoding="utf-8"),first_text)
+        self.assertEqual(Path(first_audit["path"]).read_text(encoding="utf-8"),first_audit_text)
+        self.assertTrue(drafts[1]["path"].endswith("bible_draft.r002.md"))
+        self.assertTrue(audits[1]["path"].endswith("bible_audit.r002.md"))
+        self.assertIn("改訂済み",Path(drafts[1]["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(result["status"],"bible_awaiting_approval")
+
+    def test_bible_revision_uses_separate_runs_and_agents(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        drafts=self.artifacts(session,"bible_draft"); audits=self.artifacts(session,"bible_audit")
+        run_ids={d["run_id"] for d in drafts}|{a["run_id"] for a in audits}
+        self.assertEqual(len(run_ids),4,"4件すべて別run")
+        self.assertEqual(drafts[1]["agent_id"],"story-architect")
+        self.assertEqual(audits[1]["agent_id"],"continuity-reviewer")
+        self.assertNotEqual(drafts[1]["agent_id"],audits[1]["agent_id"])
+
+    def test_bible_revision_records_history_and_source_path(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        drafts=self.artifacts(session,"bible_draft"); audits=self.artifacts(session,"bible_audit")
+        self.assertEqual(drafts[1]["source_path"],drafts[0]["path"],"r002のsource_pathがr001")
+        self.assertEqual(audits[1]["source_path"],drafts[1]["path"],"再監査のsource_pathがr002")
+        self.assertEqual(drafts[1]["status"],"revised")
+        with self.orch.connection() as db:
+            actions=[dict(r) for r in db.execute("SELECT * FROM story_design_actions WHERE session_id=? AND action='revise'",(session,))]
+        self.assertEqual(len(actions),1)
+        self.assertTrue(actions[0]["instruction_path"].endswith("BIBLE_REVISION.v001.md"))
+        self.assertEqual(actions[0]["stage"],"bible")
+
+    def test_bible_revision_passes_instruction_by_path_not_argv(self):
+        manager,started,instructions=self.real_bible()
+        instructions.write_text("## 修正1\n\n"+"長い改訂指示。"*500,encoding="utf-8")
+        manager.revise_bible(self.work,started["session_id"],instructions=instructions)
+        with self.orch.connection() as db:
+            row=db.execute("SELECT instruction_path FROM story_design_actions WHERE session_id=? AND action='revise'",(started["session_id"],)).fetchone()
+        # DBへ残るのは本文ではなくパス
+        self.assertLess(len(row[0]),len(instructions.read_text(encoding="utf-8")))
+        self.assertTrue(row[0].endswith("BIBLE_REVISION.v001.md"))
+
+    def test_bible_revision_does_not_fall_back_to_dummy(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        self.orch.adapters["agy"].always_fail_bible=True
+        with self.assertRaisesRegex(KoboError,"ダミーへ代替しません"):
+            manager.revise_bible(self.work,session,instructions=instructions)
+        drafts=self.artifacts(session,"bible_draft")
+        self.assertEqual([d["revision"] for d in drafts],[1],"不合格のr002は保存されない")
+        self.assertFalse((Path(drafts[0]["path"]).parent/"bible_draft.r002.md").exists())
+        # 何も確定していないので、承認待ちへ戻り再試行できる
+        self.assertEqual(manager.status(self.work,session)["status"],"bible_awaiting_approval")
+        self.orch.adapters["agy"].always_fail_bible=False
+        retried=manager.revise_bible(self.work,session,instructions=instructions)
+        self.assertEqual(retried["status"],"bible_awaiting_approval")
+        self.assertEqual([d["revision"] for d in self.artifacts(session,"bible_draft")],[1,2])
+
+    def test_bible_revision_does_not_auto_approve_or_finalize(self):
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        manager.revise_bible(self.work,session,instructions=instructions)
+        self.assertEqual(manager.status(self.work,session)["status"],"bible_awaiting_approval")
+        with self.orch.connection() as db:
+            docs=db.execute("SELECT COUNT(*) FROM story_design_documents WHERE session_id=?",(session,)).fetchone()[0]
+            approvals=db.execute("SELECT COUNT(*) FROM story_design_actions WHERE session_id=? AND action='approve'",(session,)).fetchone()[0]
+        self.assertEqual(docs,0,"確定バイブルが作られていない")
+        self.assertEqual(approvals,0,"自動承認されていない")
 
     def test_bible_generation_audit_and_explicit_approval(self):
         self.assertEqual(self.started["status"],"bible_awaiting_approval")

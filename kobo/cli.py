@@ -54,6 +54,7 @@ def parser() -> argparse.ArgumentParser:
     revise=sub.add_parser("concept-revise"); revise.add_argument("candidate_id"); revise.add_argument("--instructions",type=Path,required=True); revise.add_argument("--work"); revise.add_argument("--session")
     for name in ("story-start", "story-resume", "story-status"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
+    revise_bible=sub.add_parser("story-revise-bible"); revise_bible.add_argument("--instructions",type=Path,required=True); revise_bible.add_argument("--work"); revise_bible.add_argument("--session")
     show=sub.add_parser("story-show"); show.add_argument("kind", choices=("bible_draft","bible_audit","plot_draft","plot_audit","bible","plot")); show.add_argument("--work"); show.add_argument("--session")
     for name in ("story-approve-bible", "story-finalize-bible", "story-start-plot", "story-approve-plot", "story-finalize-plot"):
         command=sub.add_parser(name); command.add_argument("--work"); command.add_argument("--session")
@@ -171,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             manager=StoryDesignManager(orchestrator,dummy=args.dummy)
             if args.command=="story-start": result=manager.start(args.work)
             elif args.command=="story-resume": result=manager.resume(args.work,args.session)
+            elif args.command=="story-revise-bible": result=manager.revise_bible(args.work,args.session,instructions=args.instructions)
             elif args.command=="story-status": result=manager.status(args.work,args.session)
             elif args.command=="story-show": result=manager.show(args.kind,args.work,args.session)
             elif args.command=="story-approve-bible": result=manager.approve("bible",args.work,args.session)

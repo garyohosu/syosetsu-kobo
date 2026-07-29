@@ -39,6 +39,20 @@ def evaluation_markdown(score=3):
     return "\n\n".join(parts) + "\n\n## 総評\n\n強みと不安を要約した。\n"
 
 
+def bible_markdown(revised=False):
+    from kobo.story_design import BIBLE_HEADINGS
+    mark = "改訂済み。ギルベルトは治療だと理解した上で処分を保留する。使い魔の名はミルラ。" if revised else "初版。使い魔の名はルナ。"
+    return "# ストーリーバイブル草案\n\n" + "\n\n".join(
+        f"## {h}\n\n{h}を確定CONCEPTへ整合する形で定義する。{mark}" for h in BIBLE_HEADINGS) + "\n"
+
+
+def bible_audit_markdown(verdict="ok"):
+    from kobo.story_design import BIBLE_AUDIT
+    return "\n\n".join(
+        f"## {a}\n\n根拠: 草案の記述を確認した。\n長所: 整合している。\n弱点: 追跡が要る。\n改善案: 明示する。\n判定: {verdict}"
+        for a in BIBLE_AUDIT) + "\n\n## 監査結論\n\n確定可否は利用者承認に委ねる。\n"
+
+
 class RecordingAgyAdapter(Adapter):
     """agyの代わりに決定論的な応答を返し、渡されたプロンプトを記録する。"""
 
@@ -48,12 +62,19 @@ class RecordingAgyAdapter(Adapter):
         self.always_fail_candidates = False
         self.contaminate_candidates = 0
         self.always_contaminate = False
+        self.always_fail_bible = False
 
     def command(self, agent, refs): return ["agy", "--print", "<prompt>"]
 
     def execute(self, agent, refs, output_path):
         prompt = refs["prompt"]
         self.prompts.append((agent.agent_id, prompt))
+        if agent.agent_id == "story-architect":
+            if self.always_fail_bible:
+                atomic_write(output_path, "# 見出しの足りないバイブル\n\n## 作品の核\n\n不完全。\n"); return
+            atomic_write(output_path, bible_markdown(revised="改訂指示" in prompt)); return
+        if agent.agent_id == "continuity-reviewer":
+            atomic_write(output_path, bible_audit_markdown()); return
         if agent.agent_id == "concept-reviewer":
             if "比較総括" in prompt:
                 atomic_write(output_path, "# 比較総括\n\n## 各案の違い\n\n案ごとに読書体験が異なる。\n\n## 補助順位\n\n根拠付きの順位。\n\n## 利用者へ確認したい点\n\n判断を仰ぐ。\n"); return

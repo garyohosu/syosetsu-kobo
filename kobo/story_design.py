@@ -80,6 +80,25 @@ class StoryDesignManager:
         sources=f"- 参照CONCEPT: `{session['concept_path']}`（v{session['concept_version']:03d}、固定）\n- 参照URS: `{session['urs_path']}`\n- 生成アダプター: `dummy`（実Gemini生成物ではない）"
         return f"# {title}\n\n{sources}\n\n"+"\n\n".join(f"## {h}\n\n{values[h]}" for h in headings)+"\n"
 
+    @staticmethod
+    def _split_sections(text, headings):
+        """`## 見出し`単位に分解する。最初の見出しより前は前文として返す。"""
+        preamble, current, buffer, sections = [], None, [], {}
+        for line in text.splitlines():
+            match=re.match(r"^##\s+(.+?)\s*$",line)
+            if match:
+                if current: sections[current]="\n".join(buffer).strip()
+                elif buffer: preamble=buffer
+                current, buffer = match.group(1).strip(), []
+            else: buffer.append(line)
+        if current: sections[current]="\n".join(buffer).strip()
+        return "\n".join(preamble).strip(), {k:v for k,v in sections.items() if k in headings}
+
+    @staticmethod
+    def _join_sections(preamble, sections, headings):
+        body="\n\n".join(f"## {h}\n\n{sections[h]}" for h in headings if h in sections)
+        return (f"{preamble}\n\n{body}\n" if preamble else f"{body}\n")
+
     def _validate(self, text, headings, label):
         missing=[h for h in headings if f"## {h}" not in text]
         if missing: raise KoboError(f"{label}の必須項目が不足しています: {missing}")
@@ -244,7 +263,7 @@ class StoryDesignManager:
         "CONCEPT.v001.mdの確定事項を変更していないか。",
     )
 
-    def _bible_revision_prompt(self, session, draft_text, audit_text, instructions, headings, feedback=None)->str:
+    def _bible_revision_prompt(self, session, draft_text, audit_text, instructions, headings, feedback=None, preserve=())->str:
         concept=Path(session["concept_path"]).read_text(encoding="utf-8")
         parts=["あなたはストーリーバイブルの設計担当です。既存の草案を、確定した改訂指示に沿って改訂してください。","",
                "## 絶対条件",
@@ -262,6 +281,11 @@ class StoryDesignManager:
                "## 正本（確定CONCEPT。変更禁止）",concept,"",
                "## 改訂対象の草案（r001）",draft_text,"",
                "## 前回の独立監査結果（この指摘を踏まえて直す）",audit_text]
+        if preserve:
+            parts += ["","## 変更してはいけない見出し",
+                      "次の見出しは既存草案の本文をそのまま維持する。書き換え、要約、加筆をしない。",
+                      *[f"- {h}" for h in preserve],
+                      "これら以外の見出しだけを改訂指示に沿って直す。"]
         if feedback: parts += ["","## 前回出力の書式エラー（必ず直す）",feedback]
         return "\n".join(parts)
 
@@ -284,7 +308,7 @@ class StoryDesignManager:
             "## 修復対象（この全文を直して返す）",previous,
         ])
 
-    def _run_bible_revision(self, session, draft, audit, instruction_path, run_id, directory, headings)->str:
+    def _run_bible_revision(self, session, draft, audit, instruction_path, run_id, directory, headings, preserve=())->str:
         agent=self.orchestrator.agents["story-architect"]; limit=max(1,min(agent.max_attempts,3))
         draft_text=Path(draft["path"]).read_text(encoding="utf-8")
         audit_text=Path(audit["path"]).read_text(encoding="utf-8")
@@ -295,7 +319,7 @@ class StoryDesignManager:
             raw=attempts/f"bible-revise-attempt-{attempt}.md"
             # 文字混入だけが原因なら、作り直させず前回出力の修復を求める。
             prompt=(self._quality_repair_prompt(feedback,repair_source) if repair_source
-                    else self._bible_revision_prompt(session,draft_text,audit_text,instructions,headings,feedback))
+                    else self._bible_revision_prompt(session,draft_text,audit_text,instructions,headings,feedback,preserve))
             refs={"prompt":prompt,"output_path":str(raw),"model":self.orchestrator.config.models.get("story-architect",agent.model),
                   "run_id":run_id,"run_dir":str(directory),"agent_path":str(agent.path),
                   "mail_db":str(self.orchestrator.config.mail_db),"mail_id":str(session["source_mail_id"] or "none")}
@@ -307,6 +331,14 @@ class StoryDesignManager:
             if repaired: atomic_write(raw.with_name(raw.stem+".repaired.txt"),f"助詞「の」へ戻した`of`の件数: {repaired}")
             try:
                 self._validate(text,headings,"bible")
+                if preserve:
+                    # 変更対象外の見出しは、モデルの転記に頼らず原文を機械的に差し戻す。
+                    keep=self._split_sections(draft_text,headings)[1]
+                    preamble,sections=self._split_sections(text,headings)
+                    for heading in preserve:
+                        if heading in keep: sections[heading]=keep[heading]
+                    text=self._join_sections(preamble,sections,headings)
+                    self._validate(text,headings,"bible")
                 problems=text_quality_problems(text)
                 if problems: raise KoboError("文字品質エラー: "+" / ".join(problems))
                 return text
@@ -448,7 +480,7 @@ class StoryDesignManager:
         match=re.search(r"CONCEPT\.v(\d+)\.md$",Path(concept_path).name)
         return int(match.group(1)) if match else fallback+1
 
-    def revise_bible(self, work_id=None, session_id=None, *, instructions=None):
+    def revise_bible(self, work_id=None, session_id=None, *, instructions=None, preserve=()):
         """承認待ちのバイブル草案を版付きで改訂し、独立再監査まで行う。承認・確定はしない。"""
         session=self._session(work_id,session_id)
         # 改訂が途中で失敗したセッションは、成果物を何も確定していないため再試行を許す。
@@ -468,7 +500,7 @@ class StoryDesignManager:
             if self.dummy:
                 text=self._dummy(session,"bible"); self._validate(text,BIBLE_HEADINGS,"bible")
             else:
-                text=self._run_bible_revision(session,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS)
+                text=self._run_bible_revision(session,draft,audit,instruction_path,run_id,directory,BIBLE_HEADINGS,preserve)
             atomic_write(path,text); timestamp=now()
             with self.orchestrator.connection() as db:
                 db.execute("INSERT INTO story_design_artifacts(session_id,kind,revision,path,run_id,agent_id,status,source_path,created_at) VALUES(?,?,?,?,?,?,?,?,?)",

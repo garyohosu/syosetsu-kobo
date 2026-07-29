@@ -124,6 +124,24 @@ class StoryDesignManagerTest(unittest.TestCase):
         self.assertEqual(retried["status"],"bible_awaiting_approval")
         self.assertEqual([d["revision"] for d in self.artifacts(session,"bible_draft")],[1,2])
 
+    def test_bible_revision_preserves_out_of_scope_headings_verbatim(self):
+        """変更対象外の見出しは、モデルが書き換えても原文へ機械的に差し戻される。"""
+        manager,started,instructions=self.real_bible()
+        session=started["session_id"]
+        r001=self.artifacts(session,"bible_draft")[0]
+        before=manager._split_sections(Path(r001["path"]).read_text(encoding="utf-8"),BIBLE_HEADINGS)[1]
+        change=("世界のルール","主要舞台")
+        preserve=tuple(h for h in BIBLE_HEADINGS if h not in change)
+        manager.revise_bible(self.work,session,instructions=instructions,preserve=preserve)
+        r002=self.artifacts(session,"bible_draft")[1]
+        after=manager._split_sections(Path(r002["path"]).read_text(encoding="utf-8"),BIBLE_HEADINGS)[1]
+        for heading in preserve:
+            self.assertEqual(after[heading],before[heading],f"{heading}が原文と異なる")
+        for heading in change:
+            self.assertIn("改訂済み",after[heading],f"{heading}に改訂が反映されていない")
+        prompt=[p for agent_id,p in self.orch.adapters["agy"].prompts if agent_id=="story-architect"][-1]
+        self.assertIn("変更してはいけない見出し",prompt)
+
     def rebase_inputs(self):
         concept=self.root/"novels"/self.work/"CONCEPT.v002.md"
         concept.parent.mkdir(parents=True,exist_ok=True)
